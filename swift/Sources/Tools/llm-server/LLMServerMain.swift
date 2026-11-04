@@ -57,6 +57,12 @@ struct LLMServer: AsyncParsableCommand {
     @Option(help: "Largest exported prefill query width to use (functional backend)")
     var prefillChunkSize: Int?
 
+    @Flag(help: "Disable persistent prefill KV buffers for comparison")
+    var disablePersistentPrefill = false
+
+    @Option(help: "Maximum prefill chunks between decode steps; zero visits all rows")
+    var prefillChunksPerStep: Int = 1
+
     @Option(help: "Environment variable containing an optional HTTP bearer token")
     var apiKeyEnv: String?
 
@@ -164,6 +170,9 @@ struct LLMServer: AsyncParsableCommand {
     var verbose: Bool = false
 
     func validate() throws {
+        guard prefillChunksPerStep >= 0 else {
+            throw ValidationError("prefill-chunks-per-step must be >= 0")
+        }
         guard requestTimeoutSeconds.isFinite, requestTimeoutSeconds >= 0 else {
             throw ValidationError("--request-timeout-seconds must be finite and nonnegative")
         }
@@ -245,7 +254,8 @@ struct LLMServer: AsyncParsableCommand {
             if verbose { print("Loading functional batch backend") }
             let scheduler = try await BatchScheduler.functionalGemma(
                 assetURL: bundle.bundlePath, maxConcurrent: rows, maxQueued: maxQueueDepth,
-                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize)
+                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize, persistentPrefill: !disablePersistentPrefill,
+                prefillChunksPerStep: prefillChunksPerStep)
             if verbose { print("Functional batch backend loaded") }
             functionalScheduler = scheduler
             engine = SchedulerSession(sink: scheduler, config: engineConfig, stopTokenIds: [])

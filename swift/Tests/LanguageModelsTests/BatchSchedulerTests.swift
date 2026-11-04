@@ -484,10 +484,13 @@ private final class ChunkedCountUpStep: IncrementalPrefillStep, @unchecked Senda
     let delegate = CountUpDecodeStep(capacity: 2)
     let maxBatchCapacity = 2
     private let cursors = Mutex([0,0])
+    private let trace = Mutex([String]())
+    var events: [String] { trace.withLock { $0 } }
     func beginPrefill(row: Int, promptTokens: [Int32], session: any BatchSessionState) throws {
         cursors.withLock { $0[row] = 0 }
     }
     func prefillChunk(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType]? {
+        trace.withLock { $0.append("P" + String(row)) }
         try await Task.sleep(for: .milliseconds(1))
         let complete = cursors.withLock { values in
             values[row] += 2
@@ -499,7 +502,8 @@ private final class ChunkedCountUpStep: IncrementalPrefillStep, @unchecked Senda
         throw CountUpDecodeStep.Boom() // Scheduler must use the incremental contract.
     }
     func decodeBatch(tokensPerRow: [[Int32]], startPositions: [Int], session: any BatchSessionState) async throws -> [[LogitsScalarType]] {
-        try await delegate.decodeBatch(tokensPerRow: tokensPerRow, startPositions: startPositions, session: session)
+        trace.withLock { $0.append("D") }
+        return try await delegate.decodeBatch(tokensPerRow: tokensPerRow, startPositions: startPositions, session: session)
     }
     func allPositionLogits(tokensPerRow: [[Int32]], startPosition: Int, session: any BatchSessionState) async throws -> [LogitsScalarType] {
         countUpAllPositions(tokensPerRow)
@@ -561,5 +565,25 @@ extension BatchSchedulerTests {
         #expect(next.tokens == [9,10])
         #expect(scheduler.occupancy.active == 0)
         #expect(scheduler.occupancy.queued == 0)
+    }
+}
+
+extension BatchSchedulerTests {
+    @Test("A global prefill budget bounds work between decode steps")
+    func globalPrefillBudget() async throws {
+        let step = ChunkedCountUpStep()
+        let scheduler = BatchScheduler(decodeStep: step, session: dummySession(),
+            maxConcurrent: 2, prefillChunksPerStep: 1)
+        let results = try await scheduler.run([
+            req(prompt: [1], maxTokens: 20),
+            req(prompt: Array(repeating: 10, count: 20), maxTokens: 3)])
+        #expect(results[0].tokens.count == 20)
+        #expect(results[1].tokens == [11,12,13])
+        var prefills = 0
+        for event in step.events {
+            if event == "D" { prefills = 0 }
+            else { prefills += 1; #expect(prefills <= 1) }
+        }
+        #expect(scheduler.occupancy.active == 0)
     }
 }

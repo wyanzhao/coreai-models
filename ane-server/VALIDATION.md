@@ -57,3 +57,5 @@ cases (1K/4K/8K,128/256 output) with compiler CPU deltas at most0.01seconds
 per case. The B4 deployment was reached over LAN and returned the expected
 Chinese translation. launchd startup was tested after moving model assets
 outside Documents; login/reboot behavior is configured, not reboot-tested.
+
+The v8 prefill update is covered in [PREFILL_RESULTS.md](PREFILL_RESULTS.md), including25 cross-variant comparisons,64 cold-prefix timing observations and repeated HTTP lifecycle checks.

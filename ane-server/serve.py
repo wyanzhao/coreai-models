@@ -7,9 +7,9 @@ from pathlib import Path
 VALUE_OPTIONS = {
     "host", "port", "server_model_name", "max_tokens", "max_output_tokens",
     "temperature", "concurrent_requests", "max_queue_depth", "prefix_cache_mib",
-    "prefill_chunk_size", "request_timeout_seconds", "api_key_env",
+    "prefill_chunk_size", "request_timeout_seconds", "api_key_env", "prefill_chunks_per_step",
 }
-FLAGS = {"functional_batch", "no_thinking", "verbose"}
+FLAGS = {"functional_batch", "no_thinking", "verbose", "disable_persistent_prefill"}
 
 
 def command(config_path, binary=None):

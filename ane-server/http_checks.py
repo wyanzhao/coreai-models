@@ -12,6 +12,14 @@ headers={"Content-Type":"application/json","Authorization":"Bearer "+args.key_fi
 def call(path,body=None):
     request=urllib.request.Request(args.base+path,headers=headers,data=json.dumps(body).encode() if body is not None else None)
     with urllib.request.urlopen(request,timeout=150) as response:return json.load(response)
+for auth in (None,"Bearer invalid-test-token"):
+    invalid_headers={} if auth is None else {"Authorization":auth}
+    try:
+        urllib.request.urlopen(urllib.request.Request(args.base+"/v1/models",headers=invalid_headers),timeout=10)
+    except urllib.error.HTTPError as error:
+        assert error.code==401
+    else:
+        raise AssertionError("unauthenticated API request accepted")
 model=call("/v1/models")["data"][0]["id"]
 unit="The research team measured the temperature every morning. They compared the results with previous observations and carefully recorded the differences. The report explains how the new procedure improves reliability and reduces unnecessary work."
 body={"model":model,"messages":[{"role":"system","content":"Translate all numbered paragraphs into simplified Chinese. Preserve numbering. Return only translations."},{"role":"user","content":"\n".join(f"{i}. {unit}" for i in range(1,40))}],"max_tokens":1000,"temperature":0,"raw":True}
@@ -67,3 +75,29 @@ args.output.write_text(json.dumps(result,indent=2,ensure_ascii=False))
 assert statuses.count(429)>=1,statuses
 assert ready["batching"]["active"]==0 and ready["batching"]["queued"]==0,ready
 print(json.dumps({"burst":statuses,"after_cancel_ready":ready}))
+
+# Close a stream before consuming its first generated token. The scheduler
+# must release any request-owned prefill bank as well as the logical slot.
+prefill_body=dict(body,stream=True,max_tokens=256)
+prefill_body["messages"]=[{"role":"system","content":"Cancel-prefill test. Translate to Chinese."},
+    {"role":"user","content":"\n".join(f"{i}. {unit}" for i in range(1,200))}]
+request=urllib.request.Request(args.base+"/v1/chat/completions",headers=headers,data=json.dumps(prefill_body).encode())
+start=time.monotonic()
+response=urllib.request.urlopen(request,timeout=30)
+admission_deadline=time.monotonic()+2
+while time.monotonic()<admission_deadline:
+    prefill_active=call("/ready")
+    if prefill_active["batching"]["active"]>0:break
+    time.sleep(.01)
+assert prefill_active["batching"]["active"]>0
+time.sleep(.05)
+response.close()
+deadline=time.monotonic()+15
+while time.monotonic()<deadline:
+    prefill_ready=call("/ready")
+    if prefill_ready["batching"]["active"]==0 and prefill_ready["batching"]["queued"]==0:break
+    time.sleep(.05)
+assert prefill_ready["batching"]["active"]==0 and prefill_ready["batching"]["queued"]==0
+result.update(prefill_disconnect_seconds=time.monotonic()-start,prefill_disconnect_ready=prefill_ready,prefill_active_ready=prefill_active,auth_checks=True)
+args.output.write_text(json.dumps(result,indent=2,ensure_ascii=False))
+print(json.dumps({"prefill_disconnect_seconds":result["prefill_disconnect_seconds"],"auth_checks":True}))

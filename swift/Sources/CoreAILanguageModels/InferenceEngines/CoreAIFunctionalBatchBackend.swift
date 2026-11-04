@@ -8,20 +8,34 @@ import Synchronization
 /// Experimental functional-KV backend. Calls must be serialized by BatchScheduler.
 /// This asset ABI is separate from the shipping static-shape engine.
 final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sendable {
+    final class PrefillBank {
+        var buffers: [String: NDArray] = [:]
+        var descriptors: [String: NDArrayDescriptor] = [:]
+        var cursor = 0
+        var bytes = 0
+    }
     final class Session: BatchSessionState {
         var rows: [ReadonlyBatchKV]
         var deviceCaches: [String: NDArray] = [:]
         var boundCursors: [Int?]
         var deviceRows: [Int] = []
         var deviceBatch = 0
+        var prefillBanks: [Int: PrefillBank] = [:]
+        let prefillCacheBytes = Atomic<Int>(0)
         let deviceCacheBytes = Atomic<Int>(0)
         let hostStateBytes: Int
         init(rows: [ReadonlyBatchKV]) {
             self.rows = rows; boundCursors = Array(repeating: nil, count: rows.count)
             hostStateBytes = rows.reduce(0) { $0 + $1.byteCount }
         }
-        var estimatedStateBytes: Int { hostStateBytes + deviceCacheBytes.load(ordering: .relaxed) }
+        var estimatedStateBytes: Int { hostStateBytes + deviceCacheBytes.load(ordering: .relaxed) + prefillCacheBytes.load(ordering: .relaxed) }
         var estimatedLogitsScratchBytes: Int { 0 }
+    }
+    private let kvOnlyPrefill: Bool
+    private let persistentPrefill: Bool
+    private let io = Mutex((legacyKVBytes: 0, fullBindBytes: 0, updateBytes: 0, logitsReadBytes: 0))
+    var prefillIOMetrics: (legacyKVBytes: Int, fullBindBytes: Int, updateBytes: Int, logitsReadBytes: Int) {
+        io.withLock { $0 }
     }
     private let plan: FunctionalBatchPlan
     var maxBatchCapacity: Int { plan.capacity }
@@ -42,10 +56,11 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
     var prefixMetrics: (hits: Int, misses: Int, tokens: Int, bytes: Int) { counters.withLock { $0 } }
     var reusedPrefixTokens: Int { prefixMetrics.tokens }
 
-    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil) async throws {
+    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true) async throws {
         guard let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf:
             assetURL.appendingPathComponent("batch-manifest.json"))) as? [String: Any],
-            manifest["abi"] as? String == "gemma4-readonly-batch-v1",
+            let abi = manifest["abi"] as? String,
+            ["gemma4-readonly-batch-v1", "gemma4-readonly-batch-v2"].contains(abi),
             let cfg = manifest["text_config"] as? [String: Any],
             let context = manifest["context_capacity"] as? Int,
             let ring = manifest["sliding_ring"] as? Int,
@@ -66,6 +81,9 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             let pleFile = manifest["ple_file"] as? String else {
             throw InferenceRuntimeError.invalidState("Invalid functional Gemma asset manifest")
         }
+        let headless = abi == "gemma4-readonly-batch-v2"
+        kvOnlyPrefill = headless
+        self.persistentPrefill = persistentPrefill
         guard let contracts = manifest["functions"] as? [[String: Any]] else {
             throw InferenceRuntimeError.invalidState("Missing functional graph contracts")
         }
@@ -75,6 +93,12 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
                   contract["context_capacity"] as? Int == context,
                   contract["name"] as? String == "decode_b\(batch)_q\(query)_c\(context)" else {
                 throw InferenceRuntimeError.invalidState("Invalid functional graph contract")
+            }
+            if headless {
+                let expected = (query > 1 ? [] : ["logits"]) + ["new_global_k", "new_global_v", "new_sliding_k", "new_sliding_v"]
+                guard contract["outputs"] as? [String] == expected, query == 1 || batch == 1 else {
+                    throw InferenceRuntimeError.invalidState("Invalid KV-only prefill contract")
+                }
             }
             return .init(batch: batch, query: query)
         }
@@ -111,11 +135,21 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             let (b,q) = (shape.batch, shape.query)
             let key = "\(b):\(q)"
             CLILogger.log("Loading functional entrypoint \(key)")
-            guard let fn = runtime.functions[key],
-                  case .ndArray(let desc) = fn.descriptor.inputDescriptor(of: "embedding_table") else {
+            guard let fn = runtime.functions[key] else {
                 throw InferenceRuntimeError.invalidState("Missing functional batch entrypoint \(key)")
             }
+            let expectedOutputs = (headless && q > 1 ? [] : ["logits"]) + ["new_global_k", "new_global_v", "new_sliding_k", "new_sliding_v"]
+            guard Set(fn.descriptor.outputNames) == Set(expectedOutputs) else {
+                throw InferenceRuntimeError.invalidState("Unexpected functional outputs")
+            }
             loaded[key] = fn
+            if !fn.descriptor.inputNames.contains("embedding_table") {
+                guard headless && q > 1 else { throw InferenceRuntimeError.invalidState("Missing decode embedding table") }
+                continue
+            }
+            guard case .ndArray(let desc) = fn.descriptor.inputDescriptor(of: "embedding_table") else {
+                throw InferenceRuntimeError.invalidState("Invalid embedding descriptor")
+            }
             if sharedDescriptor == desc, let sharedTable {
                 tables[key] = sharedTable
             } else {
@@ -185,6 +219,13 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         return state
     }
 
+    func endPrefill(row: Int, session: any BatchSessionState) {
+        guard let session = session as? Session else { return }
+        if let bank = session.prefillBanks.removeValue(forKey: row) {
+            _ = session.prefillCacheBytes.wrappingSubtract(bank.bytes, ordering: .relaxed)
+        }
+    }
+
     func beginPrefill(row: Int, promptTokens: [Int32], session: any BatchSessionState) throws {
         let session = try cast(session)
         guard session.rows.indices.contains(row), !promptTokens.isEmpty, promptTokens.count <= geometry.context else {
@@ -197,21 +238,34 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         }
         session.rows[row] = state
         session.boundCursors[row] = nil
+        if let old = session.prefillBanks.removeValue(forKey: row) {
+            _ = session.prefillCacheBytes.wrappingSubtract(old.bytes, ordering: .relaxed)
+        }
     }
 
     func prefillChunk(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType]? {
         let session = try cast(session)
         var state = session.rows[row]
+        // Remove the second host owner before committing new KV; otherwise Swift
+        // COW copies the full 16K arrays on every chunk.
+        if persistentPrefill { session.rows[row] = emptyState }
+        defer { session.rows[row] = state }
         let remaining = promptTokens.count - state.cursor
         let shape = try plan.prefill(remaining: remaining)
         let (physicalBatch,q,valid) = (shape.batch,shape.query,shape.valid)
         var tokens = Array(promptTokens[state.cursor..<state.cursor + valid])
         tokens += Array(repeating: 0, count: q - valid)
+        let bank = persistentPrefill && q > 1 ? try bindPrefillBank(session, row: row, query: q, state: state) : nil
+        let position = state.cursor
         let result = try await forward(
             tokens: [tokens] + Array(repeating: Array(repeating: Int32(0), count: q), count: physicalBatch - 1),
-            states: [state] + Array(repeating: emptyState, count: physicalBatch - 1))
+            states: [state] + Array(repeating: emptyState, count: physicalBatch - 1),
+            deviceCaches: bank?.buffers)
         try commit(result, row: 0, batch: physicalBatch, query: q, valid: valid, state: &state)
-        session.rows[row] = state
+        if let bank {
+            writePrefillUpdates(bank, outputs: result, position: position, query: q, valid: valid)
+            bank.cursor = state.cursor
+        }
         session.boundCursors[row] = nil
         if state.cursor < promptTokens.count {
             // Keep useful shared prefixes and sparse long checkpoints; copying
@@ -224,7 +278,11 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             }
             return nil
         }
-        return capped(Array(result["logits"]![(valid - 1) * vocab..<valid * vocab]))
+        if let old = session.prefillBanks.removeValue(forKey: row) {
+            _ = session.prefillCacheBytes.wrappingSubtract(old.bytes, ordering: .relaxed)
+        }
+        guard let logits = result["logits"] else { throw InferenceRuntimeError.invalidState("Final prefill needs logits") }
+        return capped(Array(logits[(valid - 1) * vocab..<valid * vocab]))
     }
 
     func prefillRow(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType] {
@@ -350,6 +408,85 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         for row in states.indices where active[row] { session.boundCursors[logicalRows[row]] = states[row].cursor }
     }
 
+    /// A request owns one descriptor-checked bank. q32/q64 share it only when
+    /// all physical descriptors agree. No layout or residency is inferred from shape.
+    private func bindPrefillBank(_ session: Session, row: Int, query: Int, state: ReadonlyBatchKV) throws -> PrefillBank {
+        let fn = functions["1:\(query)"]!
+        var descriptors: [String: NDArrayDescriptor] = [:]
+        for (name,_,layers,channels,capacity) in cacheLayouts {
+            guard case .ndArray(let desc) = fn.descriptor.inputDescriptor(of: name),
+                  desc.shape == [layers, channels, 1, capacity],
+                  (desc.interleaveLayout?.factor ?? 1) == 1 || desc.interleaveLayout?.dimension != 2 else {
+                throw InferenceRuntimeError.invalidState("Unsupported prefill KV descriptor")
+            }
+            descriptors[name] = desc
+        }
+        if let bank = session.prefillBanks[row], bank.descriptors == descriptors {
+            guard bank.cursor == state.cursor else { throw InferenceRuntimeError.invalidState("Stale prefill bank") }
+            return bank
+        }
+        if let old = session.prefillBanks.removeValue(forKey: row) {
+            _ = session.prefillCacheBytes.wrappingSubtract(old.bytes, ordering: .relaxed)
+        }
+        let bank = PrefillBank()
+        bank.descriptors = descriptors
+        bank.cursor = state.cursor
+        for (name,path,layers,channels,capacity) in cacheLayouts {
+            let desc = descriptors[name]!
+            var array = NDArray(descriptor: desc)
+            _ = array.mutableRawView().withUnsafeMutableBytes { ptr,_,_ in memset(ptr,0,desc.minimumByteCount) }
+            let used = min(state.cursor, capacity)
+            if used > 0 {
+                let source = state[keyPath: path]
+                let factor = array.interleaveLayout?.factor ?? 1
+                let dim = array.interleaveLayout?.dimension ?? 0
+                array.mutableView(as: Float16.self).withUnsafeMutablePointer { ptr,_,strides in
+                    for layer in 0..<layers { for channel in 0..<channels {
+                        let base = (dim == 0 ? layer / factor : layer) * strides[0]
+                            + (dim == 1 ? channel / factor : channel) * strides[1]
+                            + (dim == 0 ? layer % factor : (dim == 1 ? channel % factor : 0))
+                        for position in 0..<used {
+                            let offset = base + (dim == 3 ? position / factor : position) * strides[3]
+                                + (dim == 3 ? position % factor : 0)
+                            ptr[offset] = source[(layer * channels + channel) * capacity + position]
+                        }
+                    } }
+                }
+                io.withLock { $0.fullBindBytes += layers * channels * used * MemoryLayout<Float16>.stride }
+            }
+            _ = index // Both global and ring snapshots use physical occupied slots.
+            bank.buffers[name] = array
+            bank.bytes += desc.minimumByteCount
+        }
+        session.prefillBanks[row] = bank
+        _ = session.prefillCacheBytes.wrappingAdd(bank.bytes, ordering: .relaxed)
+        return bank
+    }
+
+    private func writePrefillUpdates(_ bank: PrefillBank, outputs: [String: [Float16]], position: Int, query: Int, valid: Int) {
+        let names = ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
+        for (index,layout) in cacheLayouts.enumerated() {
+            let (name,_,layers,channels,capacity) = layout
+            let values = outputs[names[index]]!
+            let factor = bank.buffers[name]!.interleaveLayout?.factor ?? 1
+            let dim = bank.buffers[name]!.interleaveLayout?.dimension ?? 0
+            bank.buffers[name]!.mutableView(as: Float16.self).withUnsafeMutablePointer { ptr,_,strides in
+                for layer in 0..<layers { for channel in 0..<channels {
+                    let base = (dim == 0 ? layer / factor : layer) * strides[0]
+                        + (dim == 1 ? channel / factor : channel) * strides[1]
+                        + (dim == 0 ? layer % factor : (dim == 1 ? channel % factor : 0))
+                    for j in 0..<valid {
+                        let slot = index < 2 ? position + j : (position + j) % capacity
+                        let offset = base + (dim == 3 ? slot / factor : slot) * strides[3]
+                            + (dim == 3 ? slot % factor : 0)
+                        ptr[offset] = values[(layer * channels + channel) * query + j]
+                    }
+                } }
+            }
+            io.withLock { $0.updateBytes += layers * channels * valid * MemoryLayout<Float16>.stride }
+        }
+    }
+
     private func writeDeviceUpdates(_ session: Session, outputs: [String: [Float16]], row: Int, position: Int, physicalBatch batch: Int) {
         let outputNames = ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
         for (index,layout) in cacheLayouts.enumerated() {
@@ -376,7 +513,8 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         guard let fn = functions[key], tokens.flatMap({$0}).allSatisfy({ $0 >= 0 && $0 < vocab }) else {
             throw InferenceRuntimeError.invalidState("Unsupported functional shape or token")
         }
-        var inputs: [String: NDArray] = ["embedding_table": embeddingInputs[key]!]
+        var inputs: [String: NDArray] = [:]
+        if let table = embeddingInputs[key] { inputs["embedding_table"] = table }
         func add<T: BitwiseCopyable>(_ name: String, _ values: [T]) throws {
             guard case .ndArray(let desc) = fn.descriptor.inputDescriptor(of: name) else {
                 throw InferenceRuntimeError.invalidState("Missing input \(name)")
@@ -417,14 +555,17 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
                 flat.append(contentsOf: state[keyPath: path][start..<start + channels * capacity])
             } }
             try add(name, flat)
+            if q > 1 { io.withLock { $0.legacyKVBytes += flat.count * MemoryLayout<Float16>.stride } }
         }
         var output = try await fn.run(inputs: inputs)
         var result: [String: [Float16]] = [:]
-        for name in ["logits","new_global_k","new_global_v","new_sliding_k","new_sliding_v"] {
+        let outputNames = (kvOnlyPrefill && q > 1 ? [] : ["logits"]) + ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
+        for name in outputNames {
             guard let array = output.remove(name)?.ndArray else { throw InferenceRuntimeError.invalidState("Missing output \(name)") }
             let values = FunctionalTensorIO.read(array)
             guard values.allSatisfy({ $0.isFinite }) else { throw InferenceRuntimeError.invalidState("Nonfinite functional output") }
             result[name] = values
+            if name == "logits" { io.withLock { $0.logitsReadBytes += values.count * MemoryLayout<Float16>.stride } }
         }
         return result
     }

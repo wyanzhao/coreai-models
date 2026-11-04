@@ -236,3 +236,52 @@ extension FunctionalBatchIntegrationTests {
         }
     }
 }
+
+extension FunctionalBatchIntegrationTests {
+    @Test(.timeLimit(.minutes(15))) func prefillOptimizationAblations() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let baseline = env["COREAI_PREFILL_BASELINE"],
+              let candidate = env["COREAI_FUNCTIONAL_ASSET"],
+              let fixture = env["COREAI_FUNCTIONAL_CASE"] else { return }
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: fixture))) as! [String: Any]
+        let seed = (try #require(json["ids"] as? [Int])).map(Int32.init)
+        let all = Array(repeating: seed, count: 40).flatMap { $0 }
+        var reference: [[Float16]] = []
+        var headless: [[Float16]] = []
+        for (variant,path,persistent) in [("baseline",baseline,false),("headless",candidate,false),("persistent",candidate,true)] {
+            let backend = try await CoreAIFunctionalBatchBackend(assetURL: URL(fileURLWithPath:path),
+                prefixCacheBytes: 128 * 1024 * 1024, prefillQueryLimit:64, persistentPrefill:persistent)
+            var outputs: [[Float16]] = []
+            let session = try backend.makeBatchSessionState(batchSize:2)
+            for length in [32,65,577,600,1089] {
+                backend.clearPrefixCache()
+                let tokens = Array(all.prefix(length))
+                outputs.append(try await backend.prefillRow(row:0,promptTokens:tokens,session:session))
+                for step in 0..<3 {
+                    outputs.append(try await backend.decodeBatch(tokensPerRow:[[seed[step]],[0]],
+                        startPositions:[length+step,0],session:session)[0])
+                }
+                // Reuse a row and restore an independently owned cached prefix.
+                outputs.append(try await backend.prefillRow(row:1,promptTokens:tokens,session:session))
+            }
+            if variant == "baseline" { reference = outputs }
+            else {
+                for (i,values) in outputs.enumerated() {
+                    let expected = reference[i]
+                    let signal = expected.reduce(0.0) { $0 + pow(Double($1),2) }
+                    let noise = zip(values,expected).reduce(0.0) { $0 + pow(Double($1.0)-Double($1.1),2) }
+                    let top = values.indices.max(by:{values[$0] < values[$1]})
+                    let refTop = expected.indices.max(by:{expected[$0] < expected[$1]})
+                    print("prefill-ablation \(variant) case=\(i) snr=\(-10 * log10(max(noise/signal,1e-30))) top1=\(top == refTop)")
+                    #expect(values.allSatisfy { $0.isFinite })
+                    #expect(noise/signal < 0.0001)
+                    #expect(top == refTop)
+                    if persistent { let identical = values == headless[i]; #expect(identical) }
+                }
+                if !persistent { headless = outputs }
+            }
+            print("prefill-io \(variant) \(backend.prefillIOMetrics)")
+            if persistent { #expect(backend.prefillIOMetrics.legacyKVBytes == 0) }
+        }
+    }
+}

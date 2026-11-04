@@ -2,13 +2,13 @@
 
 This fork adds a Gemma4 E2B functional-KV backend: independent request state, continuous batching, chunked prefill, bounded immutable prefix snapshots, streaming chat, queue limits and cancellation.
 
-The validated serving graphs support B2/B4/B8 decode, q32/q64 prefill, and a 16384-token total context. The B4 artifact has 23,416 ANE-resident and 12 GPU-resident optimized operations in the compiler metadata. This is an ANE-dominant route, not an ANE-only guarantee or a runtime utilization percentage. Constrained JSON-schema decoding and logprob scoring are currently rejected. This is not full OpenAI API compatibility.
+The validated serving graphs support B2/B4/B8 decode, q32/q64 prefill, and a 16384-token total context. The earlier B4/v6 artifact has 23,416 ANE-resident and 12 GPU-resident optimized operations in the compiler metadata. The v8 KV-only artifact reports16,980 ANE and10 GPU operations. This is an ANE-dominant route, not an ANE-only guarantee or a runtime utilization percentage. Constrained JSON-schema decoding and logprob scoring are currently rejected. This is not full OpenAI API compatibility.
 
 ## Build and export
 
 Use full Xcode and the repository Python environment. Source weights and generated assets are not included. Initial source revision: google/gemma-4-E2B-it at 4adf15748de9e1a0097b6274cee9c15836c41c37.
 
-    PYTHONPATH=python/src USE_OS_COREAI=1 python models/gemma4/export_batched.py --source /path/to/source --source-revision YOUR_SOURCE_REVISION --output /path/to/new-asset --context 16384 --shapes 1:32,1:64,2:1,4:1
+    PYTHONPATH=python/src USE_OS_COREAI=1 python models/gemma4/export_batched.py --source /path/to/source --source-revision YOUR_SOURCE_REVISION --output /path/to/new-asset --context 16384 --shapes 1:32,1:64,2:1,4:1 --kv-only-prefill
     DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift build -c release -j 2 --product llm-server
 
 Export is not numerical validation. The initial16K B1/q1 specialization failed parity; single-request decode and one-token tails use the validated B2 graph with an inert second row.
@@ -109,3 +109,32 @@ captured logits.out.bin beside its case.json; that reference is not bundled.
 Keep deployed models and the binary in a real directory under Workspace, outside Documents/Desktop/Downloads. launchd does not inherit the terminal's protected-folder approval. The installer resolves symlinks and rejects these known protected locations before starting a job.
 
 See [the same-artifact batch4/8 comparison](BATCH_COMPARISON.md). Concurrency4 remains the default. config.batch8.example.json is an opt-in template for the separately validated B8 asset.
+
+## Prefill traffic and scheduling
+
+The opt-in exporter flag --kv-only-prefill emits ABI v2. Its q32/q64 entrypoints
+return only new KV tensors; the existing q1 tail produces the final prompt
+logits. ABI v1 assets remain supported. Each entrypoint's manifest outputs
+are checked against the loaded runtime function.
+
+The functional backend keeps one persistent prefill KV bank per occupied row.
+It reuses the bank only when all physical NDArray descriptors match, restores
+valid cached prefix positions on binding, and writes only valid new KV tokens
+after each chunk. Completion, cancellation and errors release the bank.
+This reduces host packing; it does not assert ANE SRAM residency or eliminate
+the final q1 tail's full-cache input preparation.
+
+--disable-persistent-prefill retains the old packing path for controlled
+comparisons. --prefill-chunks-per-step bounds the total chunks before the next
+decode step, with round-robin service across prefilling rows. The functional
+server defaults to1;0 visits every prefilling row as before. This is a work
+budget, not preemption of an in-flight ANE call. With q64 and budget1, at most
+64 valid prefill tokens are processed between decode steps.
+
+The real-model prefillOptimizationAblations test accepts
+COREAI_PREFILL_BASELINE alongside COREAI_FUNCTIONAL_ASSET and the token fixture.
+It compares the original asset, headless prefill and persistent buffers. The
+mixed HTTP probe benchmark_mixed.py introduces three8K requests after a1K
+request starts decoding, then records token gaps and completion times.
+
+See [the prefill optimization comparisons](PREFILL_RESULTS.md) for the v8 default, independent ablations, correctness gates and mixed-request latency.

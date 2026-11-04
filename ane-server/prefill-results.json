@@ -1,0 +1,1119 @@
+{
+  "hardware": "Mac mini Apple M6 16GiB macOS 27.0.1 (26A434)",
+  "source_revision": "4adf15748de9e1a0097b6274cee9c15836c41c37",
+  "identity": {
+    "base_commit": "4ecf7f253c25eb1570950a36cd10571954a75d42",
+    "source_diff_sha256": "b13a8cfbd289141b545b680e6d14e077735edc8eaf0e84563996aa982895a1cc",
+    "binary_sha256": "7a64e04816fc4cabf8ac32508c7c256f9ec68c98811482a996b253c1631e94c7"
+  },
+  "variants": {
+    "A": "v6, legacy prefill packing, all rows per step",
+    "B": "v8 KV-only prefill, legacy packing, all rows per step",
+    "C": "v8 KV-only, persistent KV, all rows per step",
+    "D": "v8 KV-only, persistent KV, one chunk per step"
+  },
+  "sweep": [
+    {
+      "variant": "A",
+      "nominal_prompt": 1024,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 35.001411830082475,
+        "minimum": 34.96417855850786,
+        "maximum": 35.038645101657096
+      },
+      "ttft_seconds": {
+        "mean": 0.9780502290013828,
+        "minimum": 0.9733201250019192,
+        "maximum": 0.9827803330008464
+      },
+      "decode_tps": {
+        "mean": 47.41068147298071,
+        "minimum": 47.39563769802917,
+        "maximum": 47.425725247932256
+      },
+      "actual_prompt_tokens": [
+        1085,
+        1092
+      ],
+      "rss_mib_after": {
+        "mean": 2626.0625,
+        "minimum": 2586.84375,
+        "maximum": 2665.28125
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 1024,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 59.70449367964288,
+        "minimum": 58.105333734857126,
+        "maximum": 61.30365362442864
+      },
+      "ttft_seconds": {
+        "mean": 3.832927546875908,
+        "minimum": 3.7631095727501815,
+        "maximum": 3.902745521001634
+      },
+      "decode_tps": {
+        "mean": 27.331866077727696,
+        "minimum": 25.540407318862563,
+        "maximum": 29.123324836592833
+      },
+      "actual_prompt_tokens": [
+        1087,
+        1088,
+        1090,
+        1091,
+        1092
+      ],
+      "rss_mib_after": {
+        "mean": 2658.3046875,
+        "minimum": 2612.046875,
+        "maximum": 2704.5625
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 1024,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 40.349491647460596,
+        "minimum": 40.26557453497459,
+        "maximum": 40.4334087599466
+      },
+      "ttft_seconds": {
+        "mean": 1.0081005834999814,
+        "minimum": 0.9991586670003016,
+        "maximum": 1.0170424999996612
+      },
+      "decode_tps": {
+        "mean": 47.786139418973114,
+        "minimum": 47.74801220021166,
+        "maximum": 47.82426663773457
+      },
+      "actual_prompt_tokens": [
+        1090,
+        1091
+      ],
+      "rss_mib_after": {
+        "mean": 2668.5078125,
+        "minimum": 2624.53125,
+        "maximum": 2712.484375
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 1024,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 84.14670768605117,
+        "minimum": 83.06803625946522,
+        "maximum": 85.22537911263713
+      },
+      "ttft_seconds": {
+        "mean": 3.808346265625005,
+        "minimum": 3.7314288647503417,
+        "maximum": 3.885263666499668
+      },
+      "decode_tps": {
+        "mean": 30.69362100349722,
+        "minimum": 30.494464553944322,
+        "maximum": 30.892777453050115
+      },
+      "actual_prompt_tokens": [
+        1085,
+        1086,
+        1087,
+        1089,
+        1090
+      ],
+      "rss_mib_after": {
+        "mean": 2671.0078125,
+        "minimum": 2626.46875,
+        "maximum": 2715.546875
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 20.604023812644684,
+        "minimum": 20.523061898938483,
+        "maximum": 20.684985726350888
+      },
+      "ttft_seconds": {
+        "mean": 3.5360255420018802,
+        "minimum": 3.5067879170019296,
+        "maximum": 3.565263167001831
+      },
+      "decode_tps": {
+        "mean": 47.45494386633703,
+        "minimum": 47.36971277544612,
+        "maximum": 47.54017495722794
+      },
+      "actual_prompt_tokens": [
+        4157,
+        4161
+      ],
+      "rss_mib_after": {
+        "mean": 2741.6875,
+        "minimum": 2701.625,
+        "maximum": 2781.75
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 28.087566072121668,
+        "minimum": 27.75527304887646,
+        "maximum": 28.419859095366874
+      },
+      "ttft_seconds": {
+        "mean": 13.883262578124686,
+        "minimum": 13.741575520749393,
+        "maximum": 14.02494963549998
+      },
+      "decode_tps": {
+        "mean": 29.575840047183327,
+        "minimum": 29.228784194430595,
+        "maximum": 29.922895899936062
+      },
+      "actual_prompt_tokens": [
+        4158,
+        4159,
+        4160,
+        4161,
+        4162
+      ],
+      "rss_mib_after": {
+        "mean": 2876.0078125,
+        "minimum": 2845.109375,
+        "maximum": 2906.90625
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 28.834306065732303,
+        "minimum": 28.762083305106273,
+        "maximum": 28.906528826358333
+      },
+      "ttft_seconds": {
+        "mean": 3.538837833000798,
+        "minimum": 3.510431791000883,
+        "maximum": 3.567243875000713
+      },
+      "decode_tps": {
+        "mean": 47.75890178798476,
+        "minimum": 47.70390726676934,
+        "maximum": 47.81389630920018
+      },
+      "actual_prompt_tokens": [
+        4158
+      ],
+      "rss_mib_after": {
+        "mean": 2876.1875,
+        "minimum": 2845.265625,
+        "maximum": 2907.109375
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 46.02616852616289,
+        "minimum": 45.43792752287431,
+        "maximum": 46.61440952945148
+      },
+      "ttft_seconds": {
+        "mean": 14.00381626574972,
+        "minimum": 13.78414173974943,
+        "maximum": 14.22349079175001
+      },
+      "decode_tps": {
+        "mean": 31.00825317692693,
+        "minimum": 30.852620948965672,
+        "maximum": 31.16388540488819
+      },
+      "actual_prompt_tokens": [
+        4159,
+        4160,
+        4162,
+        4163
+      ],
+      "rss_mib_after": {
+        "mean": 2872.734375,
+        "minimum": 2820.21875,
+        "maximum": 2925.25
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 8192,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 13.293499409914213,
+        "minimum": 13.224018113023943,
+        "maximum": 13.362980706804484
+      },
+      "ttft_seconds": {
+        "mean": 6.952213249998749,
+        "minimum": 6.89876829199784,
+        "maximum": 7.005658207999659
+      },
+      "decode_tps": {
+        "mean": 47.44808610563351,
+        "minimum": 47.39270908536083,
+        "maximum": 47.50346312590619
+      },
+      "actual_prompt_tokens": [
+        8250,
+        8256
+      ],
+      "rss_mib_after": {
+        "mean": 2992.9375,
+        "minimum": 2939.328125,
+        "maximum": 3046.546875
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 8192,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 16.0824103341836,
+        "minimum": 16.004573702549433,
+        "maximum": 16.160246965817763
+      },
+      "ttft_seconds": {
+        "mean": 27.533150494874917,
+        "minimum": 27.259022031250424,
+        "maximum": 27.80727895849941
+      },
+      "decode_tps": {
+        "mean": 29.794382992608654,
+        "minimum": 29.223834868940557,
+        "maximum": 30.364931116276747
+      },
+      "actual_prompt_tokens": [
+        8248,
+        8255,
+        8257,
+        8258,
+        8259
+      ],
+      "rss_mib_after": {
+        "mean": 3013.0390625,
+        "minimum": 2986.6875,
+        "maximum": 3039.390625
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 8192,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 20.72059368977327,
+        "minimum": 20.533301643754246,
+        "maximum": 20.907885735792295
+      },
+      "ttft_seconds": {
+        "mean": 7.015457333500308,
+        "minimum": 6.905494250000629,
+        "maximum": 7.125420416999987
+      },
+      "decode_tps": {
+        "mean": 47.751001682391994,
+        "minimum": 47.73560465669248,
+        "maximum": 47.76639870809151
+      },
+      "actual_prompt_tokens": [
+        8256,
+        8258
+      ],
+      "rss_mib_after": {
+        "mean": 3013.0078125,
+        "minimum": 2986.6875,
+        "maximum": 3039.328125
+      }
+    },
+    {
+      "variant": "A",
+      "nominal_prompt": 8192,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 28.455725446166866,
+        "minimum": 28.10284097841449,
+        "maximum": 28.808609913919238
+      },
+      "ttft_seconds": {
+        "mean": 27.61017281774957,
+        "minimum": 27.232841874999394,
+        "maximum": 27.98750376049975
+      },
+      "decode_tps": {
+        "mean": 30.625864613866696,
+        "minimum": 30.449444666160232,
+        "maximum": 30.80228456157316
+      },
+      "actual_prompt_tokens": [
+        8252,
+        8254,
+        8255,
+        8256,
+        8258,
+        8259
+      ],
+      "rss_mib_after": {
+        "mean": 2967.8125,
+        "minimum": 2922.71875,
+        "maximum": 3012.90625
+      }
+    },
+    {
+      "variant": "B",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 28.83485934216793,
+        "minimum": 28.499567884332553,
+        "maximum": 29.170150800003306
+      },
+      "ttft_seconds": {
+        "mean": 1.758758312498685,
+        "minimum": 1.7054030830004194,
+        "maximum": 1.8121135419969505
+      },
+      "decode_tps": {
+        "mean": 47.37580435095768,
+        "minimum": 47.34513991885808,
+        "maximum": 47.40646878305728
+      },
+      "actual_prompt_tokens": [
+        4163
+      ],
+      "rss_mib_after": {
+        "mean": 2495.375,
+        "minimum": 2197.890625,
+        "maximum": 2792.859375
+      }
+    },
+    {
+      "variant": "B",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 46.110490523051816,
+        "minimum": 45.705246004229735,
+        "maximum": 46.515735041873896
+      },
+      "ttft_seconds": {
+        "mean": 6.673334312623865,
+        "minimum": 6.570217947999481,
+        "maximum": 6.776450677248249
+      },
+      "decode_tps": {
+        "mean": 29.178272627482105,
+        "minimum": 29.141655617643824,
+        "maximum": 29.214889637320386
+      },
+      "actual_prompt_tokens": [
+        4158,
+        4159,
+        4160,
+        4161,
+        4162,
+        4163
+      ],
+      "rss_mib_after": {
+        "mean": 2662.7421875,
+        "minimum": 2395.984375,
+        "maximum": 2929.5
+      }
+    },
+    {
+      "variant": "B",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 36.12547378711956,
+        "minimum": 35.87588673919352,
+        "maximum": 36.37506083504561
+      },
+      "ttft_seconds": {
+        "mean": 1.7516175834989554,
+        "minimum": 1.7004562919973978,
+        "maximum": 1.802778875000513
+      },
+      "decode_tps": {
+        "mean": 47.798040890693144,
+        "minimum": 47.7782426267604,
+        "maximum": 47.81783915462588
+      },
+      "actual_prompt_tokens": [
+        4161,
+        4162
+      ],
+      "rss_mib_after": {
+        "mean": 2663.4765625,
+        "minimum": 2397.21875,
+        "maximum": 2929.734375
+      }
+    },
+    {
+      "variant": "B",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 67.6965504376737,
+        "minimum": 66.87156932683081,
+        "maximum": 68.52153154851656
+      },
+      "ttft_seconds": {
+        "mean": 6.7359231251248275,
+        "minimum": 6.581197906249145,
+        "maximum": 6.89064834400051
+      },
+      "decode_tps": {
+        "mean": 30.61967935479799,
+        "minimum": 30.568906712708348,
+        "maximum": 30.670451996887635
+      },
+      "actual_prompt_tokens": [
+        4159,
+        4160,
+        4161,
+        4162,
+        4163,
+        4164
+      ],
+      "rss_mib_after": {
+        "mean": 2688.265625,
+        "minimum": 2420.0625,
+        "maximum": 2956.46875
+      }
+    },
+    {
+      "variant": "C",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 32.46546424689766,
+        "minimum": 29.934152759045272,
+        "maximum": 34.996775734750045
+      },
+      "ttft_seconds": {
+        "mean": 0.9881584374998056,
+        "minimum": 0.9860181250005553,
+        "maximum": 0.9902987499990559
+      },
+      "decode_tps": {
+        "mean": 43.09888525181522,
+        "minimum": 38.65440173089269,
+        "maximum": 47.54336877273774
+      },
+      "actual_prompt_tokens": [
+        4156,
+        4160
+      ],
+      "rss_mib_after": {
+        "mean": 2782.7421875,
+        "minimum": 2754.140625,
+        "maximum": 2811.34375
+      }
+    },
+    {
+      "variant": "C",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 63.41767088815084,
+        "minimum": 62.96209092113489,
+        "maximum": 63.873250855166795
+      },
+      "ttft_seconds": {
+        "mean": 3.7416952497496823,
+        "minimum": 3.735975489498742,
+        "maximum": 3.7474150100006227
+      },
+      "decode_tps": {
+        "mean": 29.681601455562983,
+        "minimum": 29.39918209303497,
+        "maximum": 29.964020818091
+      },
+      "actual_prompt_tokens": [
+        4159,
+        4160,
+        4161,
+        4163
+      ],
+      "rss_mib_after": {
+        "mean": 2866.015625,
+        "minimum": 2852.375,
+        "maximum": 2879.65625
+      }
+    },
+    {
+      "variant": "C",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 40.3142761595743,
+        "minimum": 40.16730703253226,
+        "maximum": 40.46124528661634
+      },
+      "ttft_seconds": {
+        "mean": 1.0176741880004556,
+        "minimum": 0.9985243339979206,
+        "maximum": 1.0368240420029906
+      },
+      "decode_tps": {
+        "mean": 47.82157389088832,
+        "minimum": 47.78574931654395,
+        "maximum": 47.85739846523269
+      },
+      "actual_prompt_tokens": [
+        4159,
+        4162
+      ],
+      "rss_mib_after": {
+        "mean": 2917.484375,
+        "minimum": 2879.6875,
+        "maximum": 2955.28125
+      }
+    },
+    {
+      "variant": "C",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 85.74002512664316,
+        "minimum": 85.5774769607884,
+        "maximum": 85.90257329249792
+      },
+      "ttft_seconds": {
+        "mean": 3.7253739008751836,
+        "minimum": 3.6977134059998207,
+        "maximum": 3.7530343957505465
+      },
+      "decode_tps": {
+        "mean": 31.088611721691983,
+        "minimum": 30.95293523047195,
+        "maximum": 31.22428821291201
+      },
+      "actual_prompt_tokens": [
+        4160,
+        4161,
+        4162
+      ],
+      "rss_mib_after": {
+        "mean": 2948.3359375,
+        "minimum": 2916.546875,
+        "maximum": 2980.125
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 1024,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 42.66326203207233,
+        "minimum": 42.41656387337269,
+        "maximum": 42.909960190771976
+      },
+      "ttft_seconds": {
+        "mean": 0.32954877049996867,
+        "minimum": 0.31241720800244366,
+        "maximum": 0.3466803329974937
+      },
+      "decode_tps": {
+        "mean": 47.55542520641316,
+        "minimum": 47.551762107441725,
+        "maximum": 47.55908830538459
+      },
+      "actual_prompt_tokens": [
+        1089,
+        1090
+      ],
+      "rss_mib_after": {
+        "mean": 2252.6484375,
+        "minimum": 1865.203125,
+        "maximum": 2640.09375
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 1024,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 89.89790641631706,
+        "minimum": 89.51649378233994,
+        "maximum": 90.27931905029416
+      },
+      "ttft_seconds": {
+        "mean": 1.2122990991247207,
+        "minimum": 1.1936690939992332,
+        "maximum": 1.2309291042502082
+      },
+      "decode_tps": {
+        "mean": 29.082955069459835,
+        "minimum": 29.0676682762828,
+        "maximum": 29.09824186263687
+      },
+      "actual_prompt_tokens": [
+        1085,
+        1087,
+        1088,
+        1089,
+        1090
+      ],
+      "rss_mib_after": {
+        "mean": 2301.9453125,
+        "minimum": 1955.140625,
+        "maximum": 2648.75
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 1024,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 45.35912495840621,
+        "minimum": 45.186053351380764,
+        "maximum": 45.53219656543166
+      },
+      "ttft_seconds": {
+        "mean": 0.31859143800102174,
+        "minimum": 0.29697433399996953,
+        "maximum": 0.34020854200207395
+      },
+      "decode_tps": {
+        "mean": 47.88599510668931,
+        "minimum": 47.88514401408713,
+        "maximum": 47.886846199291476
+      },
+      "actual_prompt_tokens": [
+        1088,
+        1090
+      ],
+      "rss_mib_after": {
+        "mean": 2310.078125,
+        "minimum": 1963.453125,
+        "maximum": 2656.703125
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 1024,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 105.63155024794057,
+        "minimum": 105.11333114833462,
+        "maximum": 106.1497693475465
+      },
+      "ttft_seconds": {
+        "mean": 1.2055360001254485,
+        "minimum": 1.1790520835002098,
+        "maximum": 1.2320199167506871
+      },
+      "decode_tps": {
+        "mean": 30.466920952178164,
+        "minimum": 30.41267347451857,
+        "maximum": 30.521168429837758
+      },
+      "actual_prompt_tokens": [
+        1087,
+        1089,
+        1090,
+        1091
+      ],
+      "rss_mib_after": {
+        "mean": 2363.546875,
+        "minimum": 2069.953125,
+        "maximum": 2657.140625
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 35.0140567240129,
+        "minimum": 34.965806633095156,
+        "maximum": 35.06230681493066
+      },
+      "ttft_seconds": {
+        "mean": 0.9862542914997903,
+        "minimum": 0.9832196659990586,
+        "maximum": 0.9892889170005219
+      },
+      "decode_tps": {
+        "mean": 47.578964247163285,
+        "minimum": 47.543382868964706,
+        "maximum": 47.61454562536186
+      },
+      "actual_prompt_tokens": [
+        4159,
+        4161
+      ],
+      "rss_mib_after": {
+        "mean": 2441.3203125,
+        "minimum": 2152.78125,
+        "maximum": 2729.859375
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 4096,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 56.748200592289365,
+        "minimum": 52.219689527490665,
+        "maximum": 61.27671165708806
+      },
+      "ttft_seconds": {
+        "mean": 4.2564131249996535,
+        "minimum": 3.8355700627498663,
+        "maximum": 4.677256187249441
+      },
+      "decode_tps": {
+        "mean": 27.140245352933448,
+        "minimum": 25.376358352002185,
+        "maximum": 28.904132353864714
+      },
+      "actual_prompt_tokens": [
+        4159,
+        4161,
+        4162,
+        4163
+      ],
+      "rss_mib_after": {
+        "mean": 2619.75,
+        "minimum": 2256.828125,
+        "maximum": 2982.671875
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 38.306786519947096,
+        "minimum": 36.212735180175585,
+        "maximum": 40.40083785971861
+      },
+      "ttft_seconds": {
+        "mean": 1.3707139380003355,
+        "minimum": 1.008264167001471,
+        "maximum": 1.7331637089992
+      },
+      "decode_tps": {
+        "mean": 47.824498393138256,
+        "minimum": 47.78896953278196,
+        "maximum": 47.86002725349455
+      },
+      "actual_prompt_tokens": [
+        4158,
+        4161
+      ],
+      "rss_mib_after": {
+        "mean": 2619.8203125,
+        "minimum": 2256.90625,
+        "maximum": 2982.734375
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 4096,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 83.22937050198391,
+        "minimum": 83.05613315098635,
+        "maximum": 83.40260785298145
+      },
+      "ttft_seconds": {
+        "mean": 3.814544062375262,
+        "minimum": 3.7878309685002023,
+        "maximum": 3.8412571562503217
+      },
+      "decode_tps": {
+        "mean": 30.47357242564468,
+        "minimum": 30.453505407894923,
+        "maximum": 30.493639443394436
+      },
+      "actual_prompt_tokens": [
+        4158,
+        4159,
+        4160,
+        4161,
+        4162,
+        4163
+      ],
+      "rss_mib_after": {
+        "mean": 2557.6015625,
+        "minimum": 2253.09375,
+        "maximum": 2862.109375
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 8192,
+      "requested_output": 128,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 27.933619194943603,
+        "minimum": 27.87613041611985,
+        "maximum": 27.99110797376736
+      },
+      "ttft_seconds": {
+        "mean": 1.9088812290010537,
+        "minimum": 1.903025666000758,
+        "maximum": 1.9147367920013494
+      },
+      "decode_tps": {
+        "mean": 47.508021696118554,
+        "minimum": 47.44448633196631,
+        "maximum": 47.5715570602708
+      },
+      "actual_prompt_tokens": [
+        8255,
+        8257
+      ],
+      "rss_mib_after": {
+        "mean": 2745.7421875,
+        "minimum": 2377.15625,
+        "maximum": 3114.328125
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 8192,
+      "requested_output": 128,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 43.303551038858274,
+        "minimum": 43.24588706447869,
+        "maximum": 43.36121501323786
+      },
+      "ttft_seconds": {
+        "mean": 7.321364406250268,
+        "minimum": 7.3193036980001125,
+        "maximum": 7.323425114500424
+      },
+      "decode_tps": {
+        "mean": 29.02397978953719,
+        "minimum": 28.941529835938937,
+        "maximum": 29.106429743135443
+      },
+      "actual_prompt_tokens": [
+        8253,
+        8255,
+        8256,
+        8257,
+        8258,
+        8259
+      ],
+      "rss_mib_after": {
+        "mean": 2785.0,
+        "minimum": 2388.203125,
+        "maximum": 3181.796875
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 8192,
+      "requested_output": 256,
+      "concurrency": 1,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 35.381621252947255,
+        "minimum": 35.369543486249114,
+        "maximum": 35.39369901964539
+      },
+      "ttft_seconds": {
+        "mean": 1.9026135834974411,
+        "minimum": 1.9000286249975034,
+        "maximum": 1.905198541997379
+      },
+      "decode_tps": {
+        "mean": 47.8192449667202,
+        "minimum": 47.81825762305395,
+        "maximum": 47.820232310386444
+      },
+      "actual_prompt_tokens": [
+        8255,
+        8257
+      ],
+      "rss_mib_after": {
+        "mean": 2610.4453125,
+        "minimum": 2388.59375,
+        "maximum": 2832.296875
+      }
+    },
+    {
+      "variant": "D",
+      "nominal_prompt": 8192,
+      "requested_output": 256,
+      "concurrency": 4,
+      "repeats": 2,
+      "e2e_tps": {
+        "mean": 64.71515392760358,
+        "minimum": 64.60232057979707,
+        "maximum": 64.82798727541011
+      },
+      "ttft_seconds": {
+        "mean": 7.331872849249066,
+        "minimum": 7.308945052249328,
+        "maximum": 7.354800646248805
+      },
+      "decode_tps": {
+        "mean": 30.436908853828186,
+        "minimum": 30.423312982255688,
+        "maximum": 30.450504725400684
+      },
+      "actual_prompt_tokens": [
+        8251,
+        8252,
+        8255,
+        8256,
+        8257,
+        8258
+      ],
+      "rss_mib_after": {
+        "mean": 2677.0078125,
+        "minimum": 2364.5625,
+        "maximum": 2989.453125
+      }
+    }
+  ],
+  "mixed": [
+    {
+      "run": "0-A-mixed",
+      "compiler_quiet": null,
+      "short_total_seconds": 28.77431354199871,
+      "short_p95_token_gap_seconds": 0.1816566250017786,
+      "short_max_token_gap_seconds": 0.5926346670021303
+    },
+    {
+      "run": "1-D-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 9.046660457999678,
+      "short_p95_token_gap_seconds": 0.035654500003147405,
+      "short_max_token_gap_seconds": 0.06817612500162795
+    },
+    {
+      "run": "2-D-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 9.03043204200003,
+      "short_p95_token_gap_seconds": 0.03557379100311664,
+      "short_max_token_gap_seconds": 0.05737779100309126
+    },
+    {
+      "run": "3-A-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 27.88598662500226,
+      "short_p95_token_gap_seconds": 0.17889199999990524,
+      "short_max_token_gap_seconds": 0.3286980830016546
+    },
+    {
+      "run": "4-B-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 17.615907833001984,
+      "short_p95_token_gap_seconds": 0.09871662500154343,
+      "short_max_token_gap_seconds": 0.6438686250003229
+    },
+    {
+      "run": "5-C-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 12.38013991600019,
+      "short_p95_token_gap_seconds": 0.06177666699659312,
+      "short_max_token_gap_seconds": 0.3059957919977023
+    },
+    {
+      "run": "6-C-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 12.369173000002775,
+      "short_p95_token_gap_seconds": 0.06196079100118368,
+      "short_max_token_gap_seconds": 0.2982681670000602
+    },
+    {
+      "run": "7-B-mixed",
+      "compiler_quiet": true,
+      "short_total_seconds": 16.533806082999945,
+      "short_p95_token_gap_seconds": 0.09421904199916753,
+      "short_max_token_gap_seconds": 0.3062208750015998
+    }
+  ],
+  "limits": [
+    "Two observations per sweep configuration; not population latency percentiles.",
+    "Compiler quiet does not establish complete system isolation.",
+    "The first mixed baseline predates compiler-counter instrumentation; exclude it from quiet-gated comparisons.",
+    "Retain the first C 4K/TG128/concurrency1 decode outlier; its repeat recovered."
+  ]
+}

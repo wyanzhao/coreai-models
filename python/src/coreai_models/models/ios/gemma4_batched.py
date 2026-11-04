@@ -51,6 +51,7 @@ class BatchedReadonlyGemma4(nn.Module):
     def __init__(self, extend):
         super().__init__()
         self.extend = extend
+        self.emit_logits = True
         self.extend.prefill_mode = False
         self.extend.emit_hidden_states = True
         self.extend.global_cache = ReadonlyRowCache()
@@ -65,6 +66,12 @@ class BatchedReadonlyGemma4(nn.Module):
             causal_mask, sliding_causal_mask, key_cache, value_cache,
             sliding_key_cache, sliding_value_cache, embedding_table, ple_embeddings,
         )
+        if not self.emit_logits:
+            # Intermediate prefill only commits KV. The final one-token tail
+            # uses a decode graph to obtain logits, so this head is dead work.
+            global_k, global_v = self.extend.global_cache.updates()
+            sliding_k, sliding_v = self.extend.sliding_cache.updates()
+            return global_k, global_v, sliding_k, sliding_v
         # Keep the tied vocabulary projection at physical batch 1. Broadcasting
         # [1,V,H] over request batch B sent the huge head matmul to GPU for B=2.
         # Fold request/token into one spatial sequence, then restore logical rows.
@@ -93,10 +100,13 @@ class FlatKVBatchedReadonlyGemma4(nn.Module):
         b = transformer_input.shape[0]
         caches = [x.reshape(x.shape[0] // b, b, *x.shape[1:]) for x in
                   (key_cache, value_cache, sliding_key_cache, sliding_value_cache)]
-        logits, *updates = self.model(transformer_input, rope_cos, rope_sin,
+        result = self.model(transformer_input, rope_cos, rope_sin,
                                       causal_mask, sliding_causal_mask, *caches,
                                       embedding_table, ple_embeddings)
-        return (logits, *(x.reshape(x.shape[0] * b, *x.shape[2:]) for x in updates))
+        if self.model.emit_logits:
+            logits, *updates = result
+            return (logits, *(x.reshape(x.shape[0] * b, *x.shape[2:]) for x in updates))
+        return tuple(x.reshape(x.shape[0] * b, *x.shape[2:]) for x in result)
 
 
 class SpatialGeGLUMLP(nn.Module):

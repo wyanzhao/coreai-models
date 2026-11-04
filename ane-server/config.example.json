@@ -1,5 +1,5 @@
 {
-  "model": "../ane-assets/gemma4-e2b-b4-c16384-v6",
+  "model": "../ane-assets/gemma4-e2b-b4-c16384-v8-kvonly",
   "functional_batch": true,
   "host": "127.0.0.1",
   "port": 18083,
@@ -12,5 +12,6 @@
   "max_output_tokens": 4096,
   "request_timeout_seconds": 120,
   "temperature": 0,
-  "no_thinking": true
+  "no_thinking": true,
+  "prefill_chunks_per_step": 1
 }

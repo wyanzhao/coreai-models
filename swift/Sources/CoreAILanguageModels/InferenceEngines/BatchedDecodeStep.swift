@@ -67,7 +67,12 @@ protocol BatchedDecodeStep {
 
 /// Optional bounded prefill work, allowing decode between prompt chunks.
 protocol IncrementalPrefillStep: BatchedDecodeStep {
+    func endPrefill(row: Int, session: any BatchSessionState)
     func beginPrefill(row: Int, promptTokens: [Int32], session: any BatchSessionState) throws
     /// Returns final prompt logits only when the complete prompt has been committed.
     func prefillChunk(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType]?
+}
+
+extension IncrementalPrefillStep {
+    func endPrefill(row: Int, session: any BatchSessionState) {}
 }

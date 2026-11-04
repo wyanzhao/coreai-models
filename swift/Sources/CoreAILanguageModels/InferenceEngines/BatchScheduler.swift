@@ -39,6 +39,8 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
     package let maxConcurrent: Int
     /// Requests allowed to wait beyond the free rows, or `nil` for no limit. At least 0.
     private let maxQueued: Int?
+    private let prefillChunksPerStep: Int
+    private var nextPrefillSlot = 0
 
     /// True when more than one request can decode at a time (`maxConcurrent > 1`).
     package var supportsContinuousBatching: Bool { maxConcurrent > 1 }
@@ -107,7 +109,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
 
     init(
         decodeStep: any BatchedDecodeStep, session: any BatchSessionState, maxConcurrent: Int,
-        maxQueued: Int? = nil, maxPositions: Int = .max
+        maxQueued: Int? = nil, maxPositions: Int = .max, prefillChunksPerStep: Int = 0
     ) {
         precondition(maxConcurrent >= 1, "maxConcurrent must be >= 1")
         precondition(
@@ -118,6 +120,8 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
         self.session = session
         self.maxConcurrent = maxConcurrent
         self.maxQueued = maxQueued
+        precondition(prefillChunksPerStep >= 0)
+        self.prefillChunksPerStep = prefillChunksPerStep
         self.scorer = Scorer(decodeStep: decodeStep, maxConcurrent: maxConcurrent, maxPositions: maxPositions)
     }
 
@@ -277,14 +281,21 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
     /// Bounded prefill work per resident row, followed by a shared decode step.
     private func advancePrefills(active: inout [ActiveRow?], prefilling: inout [Pending?]) async {
         guard let incremental = decodeStep as? any IncrementalPrefillStep else { return }
-        for slot in prefilling.indices {
+        let start = nextPrefillSlot
+        var chunks = 0
+        for offset in prefilling.indices {
+            let slot = (start + offset) % prefilling.count
             guard let pending = prefilling[slot] else { continue }
             if pending.request.cancellation.isCancelled {
                 prefilling[slot] = nil
+                incremental.endPrefill(row: slot, session: session)
                 state.withLock { $0.occupiedRows -= 1 }
                 pending.continuation.finish(throwing: pending.request.cancellation.isExpired ? BatchRequestTimeout() : nil)
                 continue
             }
+            if prefillChunksPerStep > 0 && chunks >= prefillChunksPerStep { continue }
+            chunks += 1
+            nextPrefillSlot = (slot + 1) % prefilling.count
             do {
                 guard let logits = try await incremental.prefillChunk(
                     row: slot, promptTokens: pending.request.promptTokens, session: session) else { continue }
@@ -295,6 +306,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
                 stepSlot(slot, logits: logits, active: &active)
             } catch {
                 prefilling[slot] = nil
+                incremental.endPrefill(row: slot, session: session)
                 state.withLock { $0.occupiedRows -= 1 }
                 pending.continuation.finish(throwing: error)
             }
@@ -575,11 +587,11 @@ extension BatchScheduler {
     }
     /// Experimental functional-KV Gemma backend; separate from ordinary model variants.
     package static func functionalGemma(
-        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int, prefillQueryLimit: Int? = nil
+        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true, prefillChunksPerStep: Int = 1
     ) async throws -> BatchScheduler {
-        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes, prefillQueryLimit: prefillQueryLimit)
+        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes, prefillQueryLimit: prefillQueryLimit, persistentPrefill: persistentPrefill)
         return BatchScheduler(decodeStep: backend,
             session: try backend.makeBatchSessionState(batchSize: maxConcurrent),
-            maxConcurrent: maxConcurrent, maxQueued: maxQueued, maxPositions: backend.geometry.context)
+            maxConcurrent: maxConcurrent, maxQueued: maxQueued, maxPositions: backend.geometry.context, prefillChunksPerStep: prefillChunksPerStep)
     }
 }
