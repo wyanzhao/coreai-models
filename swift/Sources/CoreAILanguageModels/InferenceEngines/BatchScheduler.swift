@@ -71,7 +71,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
         mutating func dropCancelledRequests() {
             queue.removeAll { pending in
                 guard pending.request.cancellation.isCancelled else { return false }
-                pending.continuation.finish()
+                pending.continuation.finish(throwing: pending.request.cancellation.isExpired ? BatchRequestTimeout() : nil)
                 return true
             }
         }
@@ -199,7 +199,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
                 await admit(into: &active, prefilling: &prefilling)
                 await advancePrefills(active: &active, prefilling: &prefilling)
                 for slot in active.indices where active[slot]?.adapter.request.cancellation.isCancelled == true {
-                    active[slot]!.continuation.finish()
+                    active[slot]!.continuation.finish(throwing: active[slot]!.adapter.request.cancellation.isExpired ? BatchRequestTimeout() : nil)
                     retire(slot, active: &active)
                 }
 
@@ -282,7 +282,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
             if pending.request.cancellation.isCancelled {
                 prefilling[slot] = nil
                 state.withLock { $0.occupiedRows -= 1 }
-                pending.continuation.finish()
+                pending.continuation.finish(throwing: pending.request.cancellation.isExpired ? BatchRequestTimeout() : nil)
                 continue
             }
             do {
@@ -464,7 +464,7 @@ package struct BatchRequest: Sendable {
     /// Defaults to an empty string.
     let decodeStopText: @Sendable ([Int32]) -> String
     /// Cancels the request when set. Dropping the request's stream also cancels it.
-    let cancellation = RequestCancellation()
+    let cancellation: RequestCancellation
 
     init(
         promptTokens: [Int32],
@@ -472,7 +472,8 @@ package struct BatchRequest: Sendable {
         eosTokenIds: Set<Int32>,
         maxTokens: Int,
         stopSequences: StopSequences = StopSequences(sequences: []),
-        decodeStopText: @escaping @Sendable ([Int32]) -> String = { _ in "" }
+        decodeStopText: @escaping @Sendable ([Int32]) -> String = { _ in "" },
+        timeout: Duration? = nil
     ) {
         self.promptTokens = promptTokens
         self.sampling = sampling
@@ -480,14 +481,20 @@ package struct BatchRequest: Sendable {
         self.maxTokens = maxTokens
         self.stopSequences = stopSequences
         self.decodeStopText = decodeStopText
+        self.cancellation = RequestCancellation(timeout: timeout)
     }
 }
 
 /// A flag that cancels a `BatchRequest`. Safe to set from any task.
+package struct BatchRequestTimeout: Error, Sendable {}
+
 final class RequestCancellation: Sendable {
     private let cancelled = Atomic<Bool>(false)
 
-    var isCancelled: Bool { cancelled.load(ordering: .relaxed) }
+    private let deadline: ContinuousClock.Instant?
+    init(timeout: Duration? = nil) { deadline = timeout.map { ContinuousClock.now.advanced(by: $0) } }
+    var isExpired: Bool { deadline.map { ContinuousClock.now >= $0 } ?? false }
+    var isCancelled: Bool { cancelled.load(ordering: .relaxed) || isExpired }
 
     func cancel() { cancelled.store(true, ordering: .relaxed) }
 }
@@ -568,9 +575,9 @@ extension BatchScheduler {
     }
     /// Experimental functional-KV Gemma backend; separate from ordinary model variants.
     package static func functionalGemma(
-        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int
+        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int, prefillQueryLimit: Int? = nil
     ) async throws -> BatchScheduler {
-        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes)
+        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes, prefillQueryLimit: prefillQueryLimit)
         return BatchScheduler(decodeStep: backend,
             session: try backend.makeBatchSessionState(batchSize: maxConcurrent),
             maxConcurrent: maxConcurrent, maxQueued: maxQueued, maxPositions: backend.geometry.context)

@@ -12,6 +12,8 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         var rows: [ReadonlyBatchKV]
         var deviceCaches: [String: NDArray] = [:]
         var boundCursors: [Int?]
+        var deviceRows: [Int] = []
+        var deviceBatch = 0
         let deviceCacheBytes = Atomic<Int>(0)
         let hostStateBytes: Int
         init(rows: [ReadonlyBatchKV]) {
@@ -21,7 +23,8 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         var estimatedStateBytes: Int { hostStateBytes + deviceCacheBytes.load(ordering: .relaxed) }
         var estimatedLogitsScratchBytes: Int { 0 }
     }
-    let maxBatchCapacity = 2
+    private let plan: FunctionalBatchPlan
+    var maxBatchCapacity: Int { plan.capacity }
     let geometry: ReadonlyBatchKV.Geometry
     private let emptyState: ReadonlyBatchKV
     private let model: AIModel
@@ -39,7 +42,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
     var prefixMetrics: (hits: Int, misses: Int, tokens: Int, bytes: Int) { counters.withLock { $0 } }
     var reusedPrefixTokens: Int { prefixMetrics.tokens }
 
-    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024) async throws {
+    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil) async throws {
         guard let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf:
             assetURL.appendingPathComponent("batch-manifest.json"))) as? [String: Any],
             manifest["abi"] as? String == "gemma4-readonly-batch-v1",
@@ -63,6 +66,19 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             let pleFile = manifest["ple_file"] as? String else {
             throw InferenceRuntimeError.invalidState("Invalid functional Gemma asset manifest")
         }
+        guard let contracts = manifest["functions"] as? [[String: Any]] else {
+            throw InferenceRuntimeError.invalidState("Missing functional graph contracts")
+        }
+        let shapes = try contracts.map { contract -> FunctionalBatchPlan.Shape in
+            guard let batch = contract["request_batch"] as? Int,
+                  let query = contract["query_width"] as? Int,
+                  contract["context_capacity"] as? Int == context,
+                  contract["name"] as? String == "decode_b\(batch)_q\(query)_c\(context)" else {
+                throw InferenceRuntimeError.invalidState("Invalid functional graph contract")
+            }
+            return .init(batch: batch, query: query)
+        }
+        plan = try FunctionalBatchPlan(shapes: shapes, context: context, prefillQueryLimit: prefillQueryLimit)
         CLILogger.log("Functional manifest loaded: \(assetURL.path)")
         geometry = .init(context: context, ring: ring, window: window, globalLayers: ng,
             slidingLayers: ns, globalChannels: kv * gh, slidingChannels: kv * sh)
@@ -81,7 +97,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         embeddingScale = scale.data.withUnsafeBytes { Float($0.loadUnaligned(fromByteOffset: scale.dataStart, as: Float16.self)) }
         ple = try PerLayerEmbeddings(contentsOf: assetURL.appendingPathComponent(pleFile))
         CLILogger.log("Functional sidecars loaded; loading AIModel")
-        let runtime = try await Self.loadRuntime(at: assetURL.appendingPathComponent("model.aimodel"), context: context)
+        let runtime = try await Self.loadRuntime(at: assetURL.appendingPathComponent("model.aimodel"), context: context, shapes: plan.shapes)
         model = runtime.model
         CLILogger.log("Functional AIModel loaded")
         let embeddingReader = embedding
@@ -91,7 +107,8 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         var tables: [String: NDArray] = [:]
         var sharedDescriptor: NDArrayDescriptor?
         var sharedTable: NDArray?
-        for (b,q) in [(1,1),(1,32),(2,1)] {
+        for shape in plan.shapes {
+            let (b,q) = (shape.batch, shape.query)
             let key = "\(b):\(q)"
             CLILogger.log("Loading functional entrypoint \(key)")
             guard let fn = runtime.functions[key],
@@ -128,18 +145,19 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
 
     /// A cached specialization can load its model yet fail to materialize a declared
     /// function with CoreAI's nilError. Rebuild this experimental asset's cache once.
-    private static func loadRuntime(at url: URL, context: Int) async throws
+    private static func loadRuntime(at url: URL, context: Int, shapes: [FunctionalBatchPlan.Shape]) async throws
         -> (model: AIModel, functions: [String: InferenceFunction]) {
         for attempt in 0..<2 {
             let model = try await AIModel(contentsOf: url,
                 options: SpecializationOptions(preferredComputeUnitKind: .neuralEngine))
-            let names = [(1,1),(1,32),(2,1)].map { "decode_b\($0.0)_q\($0.1)_c\(context)" }
+            let names = shapes.map { "decode_b\($0.batch)_q\($0.query)_c\(context)" }
             guard names.allSatisfy({ model.functionNames.contains($0) }) else {
                 throw InferenceRuntimeError.invalidState("Functional asset is missing a required entrypoint")
             }
             do {
                 var functions: [String: InferenceFunction] = [:]
-                for (b,q) in [(1,1),(1,32),(2,1)] {
+                for shape in shapes {
+                    let (b,q) = (shape.batch, shape.query)
                     guard let fn = try model.loadFunction(named: "decode_b\(b)_q\(q)_c\(context)") else {
                         throw InferenceRuntimeError.invalidState("Declared functional entrypoint unavailable")
                     }
@@ -158,7 +176,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
     func clearPrefixCache() { prefixCache.removeAll(); counters.withLock { $0.bytes = 0 } }
 
     func makeBatchSessionState(batchSize: Int) throws -> any BatchSessionState {
-        guard (1...2).contains(batchSize) else { throw InferenceRuntimeError.invalidState("Batch capacity is 2") }
+        _ = try plan.decodeBatch(for: batchSize)
         return Session(rows: (0..<batchSize).map { _ in emptyState })
     }
 
@@ -185,22 +203,25 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         let session = try cast(session)
         var state = session.rows[row]
         let remaining = promptTokens.count - state.cursor
-        guard remaining > 0 else { throw InferenceRuntimeError.invalidState("Prefill already complete") }
-        let valid = remaining == 1 ? 1 : min(32, remaining - 1)
-        let q = valid == 1 ? 1 : 32
+        let shape = try plan.prefill(remaining: remaining)
+        let (physicalBatch,q,valid) = (shape.batch,shape.query,shape.valid)
         var tokens = Array(promptTokens[state.cursor..<state.cursor + valid])
         tokens += Array(repeating: 0, count: q - valid)
-        // The 16K B1/q1 specialization failed numerical parity on this runtime.
-        // Use the validated B2/q1 graph with an inert second row for tail tokens.
-        let physicalBatch = geometry.context >= 16384 && q == 1 ? 2 : 1
-        let result = try await forward(tokens: physicalBatch == 2 ? [tokens,[0]] : [tokens],
-            states: physicalBatch == 2 ? [state,emptyState] : [state])
+        let result = try await forward(
+            tokens: [tokens] + Array(repeating: Array(repeating: Int32(0), count: q), count: physicalBatch - 1),
+            states: [state] + Array(repeating: emptyState, count: physicalBatch - 1))
         try commit(result, row: 0, batch: physicalBatch, query: q, valid: valid, state: &state)
         session.rows[row] = state
         session.boundCursors[row] = nil
         if state.cursor < promptTokens.count {
-            prefixCache.insert(tokens: Array(promptTokens.prefix(state.cursor)), state: state)
-            counters.withLock { $0.bytes = prefixCache.residentBytes }
+            // Keep useful shared prefixes and sparse long checkpoints; copying
+            // a full snapshot after every prefill chunk is quadratic work.
+            let position = state.cursor
+            let shortCheckpoint = position <= 512 && (position & (position - 1)) == 0
+            if position == promptTokens.count - 1 || shortCheckpoint || position % 1024 == 0 {
+                prefixCache.insert(tokens: Array(promptTokens.prefix(position)), state: state)
+                counters.withLock { $0.bytes = prefixCache.residentBytes }
+            }
             return nil
         }
         return capped(Array(result["logits"]![(valid - 1) * vocab..<valid * vocab]))
@@ -219,31 +240,33 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
               tokensPerRow.allSatisfy({ $0.count == 1 }) else {
             throw InferenceRuntimeError.invalidState("Invalid functional decode batch")
         }
-        var states = session.rows
-        for i in states.indices {
-            if startPositions[i] == 0 { states[i] = emptyState }
-            else if startPositions[i] != states[i].cursor || states[i].cursor >= geometry.context {
+        let selected = startPositions.indices.filter { startPositions[$0] > 0 }
+        if selected.isEmpty { return Array(repeating: [], count: session.rows.count) }
+        for row in selected {
+            guard startPositions[row] == session.rows[row].cursor,
+                  session.rows[row].cursor < geometry.context else {
                 throw InferenceRuntimeError.invalidState("Functional row cursor mismatch or context exhausted")
             }
         }
-        let logicalBatch = states.count
-        var inputTokens = tokensPerRow
-        var active = startPositions.map { $0 > 0 }
-        if geometry.context >= 16384 && logicalBatch == 1 {
-            states.append(emptyState); inputTokens.append([0]); active.append(false)
+        let batch = try plan.decodeBatch(for: selected.count)
+        var states = selected.map { session.rows[$0] }
+        var inputTokens = selected.map { tokensPerRow[$0] }
+        var logicalRows = selected
+        var active = Array(repeating: true, count: selected.count)
+        for _ in selected.count..<batch {
+            states.append(emptyState); inputTokens.append([0]); active.append(false); logicalRows.append(-1)
         }
-        try bindDeviceRows(session, states: states, active: active)
-        let batch = states.count
+        try bindDeviceRows(session, states: states, active: active, logicalRows: logicalRows)
         let result = try await forward(tokens: inputTokens, states: states, deviceCaches: session.deviceCaches)
-        // Release the read-only copies before mutating canonical rows, avoiding a
-        // full host KV copy on every decode (snapshots still copy on first write).
         states.removeAll()
-        for i in 0..<logicalBatch where startPositions[i] > 0 {
-            try commit(result, row: i, batch: batch, query: 1, valid: 1, state: &session.rows[i])
-            writeDeviceUpdates(session, outputs: result, row: i, position: startPositions[i], physicalBatch: batch)
-            session.boundCursors[i] = session.rows[i].cursor
+        var logits = Array(repeating: [LogitsScalarType](), count: session.rows.count)
+        for (physical,row) in selected.enumerated() {
+            try commit(result, row: physical, batch: batch, query: 1, valid: 1, state: &session.rows[row])
+            writeDeviceUpdates(session, outputs: result, row: physical, position: startPositions[row], physicalBatch: batch)
+            session.boundCursors[row] = session.rows[row].cursor
+            logits[row] = capped(Array(result["logits"]![physical * vocab..<(physical + 1) * vocab]))
         }
-        return (0..<logicalBatch).map { capped(Array(result["logits"]![$0 * vocab..<($0 + 1) * vocab])) }
+        return logits
     }
 
     func allPositionLogits(tokensPerRow: [[Int32]], startPosition: Int, session: any BatchSessionState) async throws -> [LogitsScalarType] {
@@ -279,20 +302,33 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
 
     /// Rebind complete rows only at admission/restoration. Ordinary decode updates
     /// just the new K/V position in these persistent runtime-layout buffers.
-    private func bindDeviceRows(_ session: Session, states: [ReadonlyBatchKV], active: [Bool]) throws {
+    private func bindDeviceRows(_ session: Session, states: [ReadonlyBatchKV], active: [Bool], logicalRows: [Int]) throws {
         let batch = states.count
+        if session.deviceBatch != batch {
+            session.deviceCaches.removeAll()
+            session.deviceCacheBytes.store(0, ordering: .relaxed)
+            session.deviceBatch = batch
+        }
+        if session.deviceRows != logicalRows {
+            session.boundCursors = Array(repeating: nil, count: session.rows.count)
+            session.deviceRows = logicalRows
+        }
         let fn = functions["\(batch):1"]!
         for (name,path,layers,channels,capacity) in cacheLayouts {
             if session.deviceCaches[name] == nil {
                 guard case .ndArray(let desc) = fn.descriptor.inputDescriptor(of: name) else {
                     throw InferenceRuntimeError.invalidState("Missing cache descriptor")
                 }
+                guard desc.shape == [layers * batch, channels, 1, capacity],
+                      (desc.interleaveLayout?.factor ?? 1) == 1 || desc.interleaveLayout?.dimension != 2 else {
+                    throw InferenceRuntimeError.invalidState("Unsupported persistent cache layout")
+                }
                 var array = NDArray(descriptor: desc)
                 _ = array.mutableRawView().withUnsafeMutableBytes { ptr, _, _ in memset(ptr, 0, desc.minimumByteCount) }
                 session.deviceCaches[name] = array
                 _ = session.deviceCacheBytes.wrappingAdd(desc.minimumByteCount, ordering: .relaxed)
             }
-            for row in states.indices where active[row] && session.boundCursors[row] != states[row].cursor {
+            for row in states.indices where active[row] && session.boundCursors[logicalRows[row]] != states[row].cursor {
                 let source = states[row][keyPath: path]
                 let factor = session.deviceCaches[name]!.interleaveLayout?.factor ?? 1
                 let dim = session.deviceCaches[name]!.interleaveLayout?.dimension ?? 0
@@ -311,7 +347,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
                 }
             }
         }
-        for row in states.indices where active[row] { session.boundCursors[row] = states[row].cursor }
+        for row in states.indices where active[row] { session.boundCursors[logicalRows[row]] = states[row].cursor }
     }
 
     private func writeDeviceUpdates(_ session: Session, outputs: [String: [Float16]], row: Int, position: Int, physicalBatch batch: Int) {

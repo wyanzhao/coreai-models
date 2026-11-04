@@ -13,7 +13,7 @@ import NIOCore
 import NIOFoundationCompat
 import Tokenizers
 
-func startServer(state: ServerState, port: Int, host: String = "127.0.0.1") async throws {
+func startServer(state: ServerState, port: Int, host: String = "127.0.0.1", apiKey: String? = nil) async throws {
     let router = Router()
 
     router.get("/health") { _, _ in
@@ -24,7 +24,8 @@ func startServer(state: ServerState, port: Int, host: String = "127.0.0.1") asyn
         )
     }
 
-    router.get("/v1/models") { _, _ in
+    router.get("/v1/models") { request, _ in
+        if let denied = authenticationFailure(request: request, apiKey: apiKey) { return denied }
         let response = ModelsResponse(
             data: [
                 ModelsResponse.ModelInfo(
@@ -43,17 +44,20 @@ func startServer(state: ServerState, port: Int, host: String = "127.0.0.1") asyn
     }
 
     router.post("/v1/chat/completions") { request, _ in
+        if let denied = authenticationFailure(request: request, apiKey: apiKey) { return denied }
         let sessionID =
             HTTPField.Name("X-Session-ID").flatMap { request.headers[$0] } ?? "default"
         return try await handleChatCompletionsRoute(request: request, state: state, sessionID: sessionID)
     }
 
     router.post("/v1") { request, _ in
-        try await handleAutoRoute(request: request, state: state)
+        if let denied = authenticationFailure(request: request, apiKey: apiKey) { return denied }
+        return try await handleAutoRoute(request: request, state: state)
     }
 
     router.post("/v1/completions") { request, _ in
-        try await handleCompletionsRoute(request: request, state: state)
+        if let denied = authenticationFailure(request: request, apiKey: apiKey) { return denied }
+        return try await handleCompletionsRoute(request: request, state: state)
     }
 
     router.get("/ready") { _, _ in
@@ -66,7 +70,8 @@ func startServer(state: ServerState, port: Int, host: String = "127.0.0.1") asyn
         )
     }
 
-    router.get("/v1/stats") { _, _ in
+    router.get("/v1/stats") { request, _ in
+        if let denied = authenticationFailure(request: request, apiKey: apiKey) { return denied }
         let stats = state.statsSnapshot()
         let data = try JSONEncoder().encode(stats)
         return Response(
@@ -85,6 +90,21 @@ func startServer(state: ServerState, port: Int, host: String = "127.0.0.1") asyn
     // Process lifecycle is left to the supervising process. TODO: any in-process
     // idle-exit must first drain in-flight engine work (no drain hook today).
     try await app.run()
+}
+
+/// Optional bearer authentication; never log the supplied or expected token.
+private func authenticationFailure(request: Request, apiKey: String?) -> Response? {
+    guard let apiKey else { return nil }
+    let expected = Array(("Bearer " + apiKey).utf8)
+    let supplied = Array((request.headers[.authorization] ?? "").utf8)
+    var mismatch: UInt8 = supplied.count == expected.count ? 0 : 1
+    for i in expected.indices {
+        mismatch |= expected[i] ^ (i < supplied.count ? supplied[i] : 0)
+    }
+    guard mismatch != 0 else { return nil }
+    return Response(status: .unauthorized, headers: [.contentType: "application/json"],
+        body: .init(byteBuffer: ByteBuffer(string:
+            #"{"error":{"message":"Invalid API key","type":"authentication_error","code":"invalid_api_key"}}"#)))
 }
 
 // MARK: - Auto-detect Route (lm-eval posts to base_url directly)
@@ -146,6 +166,12 @@ private func handleChatCompletionsFromBody(body: ByteBuffer, state: ServerState,
             access.release()
             return response
         }
+    } catch is BatchRequestTimeout {
+        access.release()
+        let err = ErrorResponse(error: .init(message: "Request deadline exceeded",
+            type: "timeout_error", code: "request_timeout"))
+        return Response(status: .gatewayTimeout, headers: [.contentType: "application/json"],
+            body: .init(byteBuffer: ByteBuffer(data: try JSONEncoder().encode(err))))
     } catch let error as InferenceRuntimeError where error.isQueueFull {
         // Thrown by a full batch scheduler on submit, on both the streaming and non-streaming paths.
         access.release()
@@ -199,7 +225,7 @@ struct ChatCompletionOutcome {
 func runChatCompletion(chatRequest: ChatCompletionRequest, state: ServerState, sessionID: String? = nil)
     async throws -> ChatCompletionOutcome
 {
-    let requestMaxTokens = chatRequest.maxCompletionTokens ?? chatRequest.maxTokens ?? state.config.defaultMaxTokens
+    var requestMaxTokens = chatRequest.maxCompletionTokens ?? chatRequest.maxTokens ?? state.config.defaultMaxTokens
     guard requestMaxTokens > 0 else {
         throw ServerError.badRequest("max_tokens must be positive")
     }
@@ -225,6 +251,8 @@ func runChatCompletion(chatRequest: ChatCompletionRequest, state: ServerState, s
         throw ServerError.badRequest(
             "Prompt (\(promptTokens.count) tokens) exceeds context length (\(state.config.maxContextLength))")
     }
+
+    requestMaxTokens = min(requestMaxTokens, state.config.maxOutputTokens, state.config.maxContextLength - promptTokens.count)
 
     CLILogger.log(
         "[\(requestID)] messages: \(chatRequest.messages.count), tokens: \(promptTokens.count), max_tokens: \(requestMaxTokens)",
@@ -417,7 +445,7 @@ struct StreamingOutcome {
 func prepareStreaming(chatRequest: ChatCompletionRequest, state: ServerState, sessionID: String? = nil) async throws
     -> PreparedStream
 {
-    let requestMaxTokens = chatRequest.maxCompletionTokens ?? chatRequest.maxTokens ?? state.config.defaultMaxTokens
+    var requestMaxTokens = chatRequest.maxCompletionTokens ?? chatRequest.maxTokens ?? state.config.defaultMaxTokens
     guard requestMaxTokens > 0 else {
         throw ServerError.badRequest("max_tokens must be positive")
     }
@@ -442,6 +470,8 @@ func prepareStreaming(chatRequest: ChatCompletionRequest, state: ServerState, se
         throw ServerError.badRequest(
             "Prompt (\(promptTokens.count) tokens) exceeds context length (\(state.config.maxContextLength))")
     }
+
+    requestMaxTokens = min(requestMaxTokens, state.config.maxOutputTokens, state.config.maxContextLength - promptTokens.count)
 
     CLILogger.log(
         "[\(requestID)] stream, messages: \(chatRequest.messages.count), tokens: \(promptTokens.count), max_tokens: \(requestMaxTokens)",
@@ -641,7 +671,8 @@ private func handleStreamingRequest(
                     id: prepared.requestID, object: "chat.completion.chunk", created: created,
                     model: state.config.modelName,
                     choices: [.init(index: 0, delta: delta, finishReason: finishReason)],
-                    systemFingerprint: state.systemFingerprint)
+                    systemFingerprint: state.systemFingerprint,
+                    includeUsageField: chatRequest.streamOptions?.includeUsage == true)
                 if let data = try? encoder.encode(chunk), let json = String(data: data, encoding: .utf8) {
                     try await writer.write(ByteBuffer(string: "data: \(json)\n\n"))
                 }
@@ -654,10 +685,27 @@ private func handleStreamingRequest(
                 emit: { try await writeDelta($0) })
 
             try await writeDelta(.init(role: nil, content: nil), finishReason: outcome.finishReason)
+            if chatRequest.streamOptions?.includeUsage == true {
+                let usageChunk = ChatCompletionChunk(id: prepared.requestID, created: created,
+                    model: state.config.modelName, choices: [], systemFingerprint: state.systemFingerprint,
+                    usage: .init(promptTokens: outcome.promptTokenCount,
+                        completionTokens: outcome.genTokenCount,
+                        totalTokens: outcome.promptTokenCount + outcome.genTokenCount))
+                let data = try encoder.encode(usageChunk)
+                try await writer.write(ByteBuffer(string: "data: " + String(decoding: data, as: UTF8.self) + "\n\n"))
+            }
             try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
             try await writer.finish(nil)
         } catch {
             print("\(ts()) [\(prepared.requestID)] stream error: \(error)")
+            let timeout = error is BatchRequestTimeout
+            let failure = ErrorResponse(error: .init(
+                message: timeout ? "Request deadline exceeded" : "Generation failed",
+                type: timeout ? "timeout_error" : "server_error",
+                code: timeout ? "request_timeout" : "generation_failed"))
+            if let data = try? JSONEncoder().encode(failure) {
+                try? await writer.write(ByteBuffer(string: "data: " + String(decoding: data, as: UTF8.self) + "\n\n"))
+            }
             try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
             try? await writer.finish(nil)
         }

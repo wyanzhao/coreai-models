@@ -17,6 +17,7 @@ public struct ChatCompletionRequest: Decodable, Sendable {
     public let topK: Int?
     public let seed: UInt64?
     public let stream: Bool?
+    public let streamOptions: StreamOptions?
     public let stop: [String]?
     public let responseFormat: ResponseFormat?
     public let tools: [ToolDefinition]?
@@ -36,6 +37,7 @@ public struct ChatCompletionRequest: Decodable, Sendable {
         case responseFormat = "response_format"
         case toolChoice = "tool_choice"
         case parallelToolCalls = "parallel_tool_calls"
+        case streamOptions = "stream_options"
         case reasoningEffort = "reasoning_effort"
     }
 
@@ -50,6 +52,7 @@ public struct ChatCompletionRequest: Decodable, Sendable {
         topK = try container.decodeIfPresent(Int.self, forKey: .topK)
         seed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
         stream = try container.decodeIfPresent(Bool.self, forKey: .stream)
+        streamOptions = try container.decodeIfPresent(StreamOptions.self, forKey: .streamOptions)
         responseFormat = try container.decodeIfPresent(ResponseFormat.self, forKey: .responseFormat)
         tools = try container.decodeIfPresent([ToolDefinition].self, forKey: .tools)
         toolChoice = try container.decodeIfPresent(ToolChoice.self, forKey: .toolChoice)
@@ -65,6 +68,11 @@ public struct ChatCompletionRequest: Decodable, Sendable {
             stop = nil
         }
     }
+}
+
+public struct StreamOptions: Decodable, Sendable {
+    public let includeUsage: Bool?
+    enum CodingKeys: String, CodingKey { case includeUsage = "include_usage" }
 }
 
 // MARK: - Response Format (Guided Generation)
@@ -340,12 +348,15 @@ public struct ChatCompletionChunk: Encodable, Sendable {
     public let model: String
     public let choices: [ChunkChoice]
     public let systemFingerprint: String?
+    public let usage: ChatCompletionResponse.Usage?
+    private let includeUsageField: Bool
 
     public init(
         id: String, object: String = "chat.completion.chunk",
         created: Int = Int(Date().timeIntervalSince1970),
         model: String, choices: [ChunkChoice],
-        systemFingerprint: String? = nil
+        systemFingerprint: String? = nil,
+        usage: ChatCompletionResponse.Usage? = nil, includeUsageField: Bool = false
     ) {
         self.id = id
         self.object = object
@@ -353,11 +364,24 @@ public struct ChatCompletionChunk: Encodable, Sendable {
         self.model = model
         self.choices = choices
         self.systemFingerprint = systemFingerprint
+        self.usage = usage
+        self.includeUsageField = includeUsageField
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, object, created, model, choices
+        case id, object, created, model, choices, usage
         case systemFingerprint = "system_fingerprint"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(object, forKey: .object)
+        try container.encode(created, forKey: .created)
+        try container.encode(model, forKey: .model)
+        try container.encode(choices, forKey: .choices)
+        try container.encodeIfPresent(systemFingerprint, forKey: .systemFingerprint)
+        if includeUsageField || usage != nil { try container.encode(usage, forKey: .usage) }
     }
 
     public struct ChunkChoice: Encodable, Sendable {

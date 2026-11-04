@@ -35,7 +35,7 @@ def load_mapped(source,cache,context):
                     rows=max(1,8_000_000//max(1,int(np.prod(shape[1:]))))
                     for start in range(0,shape[0],rows):dest[start:start+rows]=view[start:start+rows].half().numpy()
                     dest.flush();del dest;os.replace(temporary,filename)
-                mapped=np.load(filename,mmap_mode='r+')
+                mapped=np.load(filename,mmap_mode='c')
                 if mapped.shape!=tuple(shape) or mapped.dtype!=np.float16:raise ValueError(f'Invalid mmap: {key}')
                 sd[key]=torch.from_numpy(mapped)
             else:sd[key]=f.get_tensor(key).half()
@@ -47,12 +47,19 @@ def load_mapped(source,cache,context):
 
 def main():
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
-    ap=argparse.ArgumentParser();ap.add_argument('--source',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--context',type=int,default=2048);ap.add_argument('--no-compression',action='store_true');ap.add_argument('--kv-layout', choices=['auto','interleave8'], default='auto');ap.add_argument('--shapes',default='1:32,1:1,2:1');a=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--source',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--context',type=int,default=2048);ap.add_argument('--no-compression',action='store_true');ap.add_argument('--kv-layout', choices=['auto','interleave8'], default='auto');ap.add_argument('--shapes',default='1:32,1:64,2:1,4:1');ap.add_argument('--source-revision');a=ap.parse_args()
     if a.output.exists():raise SystemExit('Use a new output directory; never overwrite an active asset.')
     a.output.mkdir(parents=True)
     shapes=[tuple(map(int,s.split(':'))) for s in a.shapes.split(',')]
-    if any(b not in (1,2,4) or q not in (1,8,32,64) for b,q in shapes):raise ValueError('unsupported geometry')
-    model,cfg=load_mapped(a.source,a.output.parent/'mapped-fp16',a.context)
+    if any(b not in (1,2,4,8) or q not in (1,8,32,64) for b,q in shapes):raise ValueError('unsupported geometry')
+    # Namespace mapped weights by source identity; tensor names alone are not a
+    # cache key across checkpoints with the same architecture.
+    weights=a.source/'model.safetensors'
+    source_identity={'path':str(a.source.resolve()),'size':weights.stat().st_size,
+                     'mtime_ns':weights.stat().st_mtime_ns,'revision':a.source_revision,
+                     'config_sha256':hashlib.sha256((a.source/'config.json').read_bytes()).hexdigest()}
+    source_key=hashlib.sha256(json.dumps(source_identity,sort_keys=True).encode()).hexdigest()
+    model,cfg=load_mapped(a.source,a.output.parent/'mapped-fp16'/source_key,a.context)
     log.info('Writing PLE sidecar on mini')
     ple=model.dump_ple_embedding(str(a.output),'gemma4-batched');del model._ple_weight;gc.collect()
     save_file({'embedding_table':model.load_embeddings.embedding_table.detach().contiguous(),
@@ -92,7 +99,7 @@ def main():
     program.save_asset(a.output/'model.aimodel')
     for name in ('tokenizer.json','tokenizer_config.json','generation_config.json','config.json','chat_template.jinja'):
         shutil.copy2(a.source/name,a.output/name)
-    manifest={'abi':'gemma4-readonly-batch-v1','status':'experimental-unvalidated','source_revision':'4adf15748de9e1a0097b6274cee9c15836c41c37','context_capacity':a.context,'kv_layout':a.kv_layout,'sliding_ring':ring,'sliding_window':cfg.sliding_window,'global_storing_layers':ng,'sliding_storing_layers':ns,'functions':contracts,'inputs':names,'outputs':outs,'embedding_file':'embeddings.safetensors','ple_file':Path(ple).name,'compression':'none' if a.no_compression else 'shipping-4bit-palettized','text_config':cfg.to_dict()}
+    manifest={'abi':'gemma4-readonly-batch-v1','status':'experimental-unvalidated','source_revision':a.source_revision,'source_identity':source_identity,'context_capacity':a.context,'kv_layout':a.kv_layout,'sliding_ring':ring,'sliding_window':cfg.sliding_window,'global_storing_layers':ng,'sliding_storing_layers':ns,'functions':contracts,'inputs':names,'outputs':outs,'embedding_file':'embeddings.safetensors','ple_file':Path(ple).name,'compression':'none' if a.no_compression else 'shipping-4bit-palettized','text_config':cfg.to_dict()}
     (a.output/'batch-manifest.json').write_text(json.dumps(manifest,indent=2))
     # Prepack the immutable output embedding once on the export machine. The
     # Swift loader checks the runtime descriptor before using this layout.

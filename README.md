@@ -1,5 +1,12 @@
 # Core AI Models
 
+This fork adds an experimental Gemma4 E2B serving backend with continuous batching,
+chunked prefill, prefix caching, cancellation and bounded request admission.
+See the [ANE server guide](ane-server/README.md),
+[validation record](ane-server/VALIDATION.md) and
+[ANE performance study](ane-server/ANE_PERFORMANCE.md).
+The implementation targets macOS 27 and is ANE-dominant, with some GPU-resident operations.
+
 Model export recipes, Python primitives, and Swift runtime utilities for building on-device AI with [Core AI](https://developer.apple.com/documentation/coreai).
 
 The main components include:

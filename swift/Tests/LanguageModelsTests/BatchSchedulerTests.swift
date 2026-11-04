@@ -544,3 +544,22 @@ extension BatchSchedulerTests {
         #expect(scheduler.occupancy.active == 0)
     }
 }
+
+extension BatchSchedulerTests {
+    @Test("Expired requests fail explicitly and release their queue place")
+    func expiredRequestsAreNotSuccessfulEmptyResponses() async throws {
+        let step = ChunkedCountUpStep()
+        let scheduler = makeScheduler(step, maxConcurrent: 2)
+        let template = req(prompt: [1], maxTokens: 2)
+        let expired = BatchRequest(promptTokens: template.promptTokens, sampling: template.sampling,
+            eosTokenIds: template.eosTokenIds, maxTokens: template.maxTokens, timeout: .zero)
+        var timedOut = false
+        do { _ = try await drain(scheduler.submit(expired)) }
+        catch is BatchRequestTimeout { timedOut = true }
+        #expect(timedOut)
+        let next = try await drain(scheduler.submit(req(prompt: [8], maxTokens: 2)))
+        #expect(next.tokens == [9,10])
+        #expect(scheduler.occupancy.active == 0)
+        #expect(scheduler.occupancy.queued == 0)
+    }
+}

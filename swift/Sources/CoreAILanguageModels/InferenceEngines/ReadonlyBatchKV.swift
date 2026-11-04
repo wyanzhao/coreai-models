@@ -150,6 +150,7 @@ final class ReadonlyPrefixCache {
         let tokens: [Int32]
         let state: ReadonlyBatchKV.Snapshot
         var accessed: UInt64
+        let shortTier: Bool
         var bytes: Int { state.byteCount + tokens.count * MemoryLayout<Int32>.stride }
     }
     let byteLimit: Int
@@ -162,15 +163,23 @@ final class ReadonlyPrefixCache {
         guard byteLimit > 0, !tokens.isEmpty, tokens.count == state.cursor else { return }
         let snapshot = state.snapshot()
         let size = snapshot.byteCount + tokens.count * MemoryLayout<Int32>.stride
-        guard size <= byteLimit else { return }
+        // Reserve a quarter of a practical cache for reusable system prefixes.
+        // Large one-off documents must not evict every short shared prefix.
+        let partitioned = byteLimit >= 4 * 1024 * 1024
+        let shortTier = partitioned && tokens.count <= 512
+        let tierLimit = partitioned ? (shortTier ? byteLimit / 4 : byteLimit - byteLimit / 4) : byteLimit
+        guard size <= tierLimit else { return }
         if let existing = entries.firstIndex(where: { $0.tokens == tokens }) {
             residentBytes -= entries.remove(at: existing).bytes
         }
-        while residentBytes > byteLimit - size, let victim = entries.indices.min(by: {
-            entries[$0].accessed < entries[$1].accessed
-        }) { residentBytes -= entries.remove(at: victim).bytes }
+        while entries.filter({ $0.shortTier == shortTier }).reduce(0, { $0 + $1.bytes }) > tierLimit - size {
+            guard let victim = entries.indices.filter({ entries[$0].shortTier == shortTier }).min(by: {
+                entries[$0].accessed < entries[$1].accessed
+            }) else { return }
+            residentBytes -= entries.remove(at: victim).bytes
+        }
         clock &+= 1
-        entries.append(Entry(tokens: tokens, state: snapshot, accessed: clock))
+        entries.append(Entry(tokens: tokens, state: snapshot, accessed: clock, shortTier: shortTier))
         residentBytes += size
     }
 

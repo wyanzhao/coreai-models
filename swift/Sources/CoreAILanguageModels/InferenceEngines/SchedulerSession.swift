@@ -23,11 +23,13 @@ package final class SchedulerSession: InferenceEngine, @unchecked Sendable {
     private let sink: any RequestSink
     /// Token ids that end the request inside the sink.
     private let stopTokenIds: Set<Int32>
+    private let requestTimeout: Duration?
 
-    package init(sink: any RequestSink, config: ModelConfig, stopTokenIds: Set<Int32>) {
+    package init(sink: any RequestSink, config: ModelConfig, stopTokenIds: Set<Int32>, requestTimeout: Duration? = nil) {
         self.sink = sink
         self.config = config
         self.stopTokenIds = stopTokenIds
+        self.requestTimeout = requestTimeout
     }
 
     /// Submits `input` to the sink and returns the request's output sequence.
@@ -46,7 +48,7 @@ package final class SchedulerSession: InferenceEngine, @unchecked Sendable {
             promptTokens: input.map { Int32($0) },
             sampling: samplingConfiguration,
             eosTokenIds: stopTokenIds,
-            maxTokens: Swift.max(1, Swift.min(requested, contextRoom)))
+            maxTokens: Swift.max(1, Swift.min(requested, contextRoom)), timeout: requestTimeout)
         return GenerationSequence(events: try sink.submit(request), cancellation: request.cancellation)
     }
 

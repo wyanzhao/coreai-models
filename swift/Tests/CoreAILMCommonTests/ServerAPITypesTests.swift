@@ -251,3 +251,22 @@ struct ServerAPITypesTests {
         #expect(ready.toolCalling == true)
     }
 }
+
+extension ServerAPITypesTests {
+    @Test func streamedUsageOptInAndTerminalChunk() throws {
+        let data = Data(#"{"messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true}}"#.utf8)
+        let request = try JSONDecoder().decode(ChatCompletionRequest.self, from: data)
+        #expect(request.streamOptions?.includeUsage == true)
+        let terminal = ChatCompletionChunk(id: "test", model: "model", choices: [],
+            usage: .init(promptTokens: 12, completionTokens: 3, totalTokens: 15))
+        let result = try JSONSerialization.jsonObject(with: JSONEncoder().encode(terminal)) as! [String: Any]
+        #expect((result["choices"] as? [Any])?.isEmpty == true)
+        #expect((result["usage"] as? [String: Int])?["total_tokens"] == 15)
+        let intermediate = ChatCompletionChunk(id: "test", model: "model", choices: [], includeUsageField: true)
+        let item = try JSONSerialization.jsonObject(with: JSONEncoder().encode(intermediate)) as! [String: Any]
+        #expect(item["usage"] is NSNull)
+        let legacy = ChatCompletionChunk(id: "test", model: "model", choices: [])
+        let unchanged = try JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as! [String: Any]
+        #expect(unchanged["usage"] == nil)
+    }
+}

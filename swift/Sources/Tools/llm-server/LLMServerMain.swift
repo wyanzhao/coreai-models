@@ -51,6 +51,18 @@ struct LLMServer: AsyncParsableCommand {
     @Option(help: "Network address to bind")
     var host: String = "127.0.0.1"
 
+    @Option(help: "Batched request deadline including scheduler queue time; zero disables")
+    var requestTimeoutSeconds: Double = 120
+
+    @Option(help: "Largest exported prefill query width to use (functional backend)")
+    var prefillChunkSize: Int?
+
+    @Option(help: "Environment variable containing an optional HTTP bearer token")
+    var apiKeyEnv: String?
+
+    @Option(help: "Hard output-token ceiling per chat request (default: model context)")
+    var maxOutputTokens: Int?
+
     @Flag(help: "Use experimental functional-KV Gemma batching asset")
     var functionalBatch: Bool = false
 
@@ -152,6 +164,16 @@ struct LLMServer: AsyncParsableCommand {
     var verbose: Bool = false
 
     func validate() throws {
+        guard requestTimeoutSeconds.isFinite, requestTimeoutSeconds >= 0 else {
+            throw ValidationError("--request-timeout-seconds must be finite and nonnegative")
+        }
+        guard maxTokens > 0, maxOutputTokens.map({ $0 > 0 }) ?? true else {
+            throw ValidationError("Token limits must be positive")
+        }
+        if let name = apiKeyEnv, ProcessInfo.processInfo.environment[name]?.isEmpty != false {
+            throw ValidationError("The API key environment variable must exist and be nonempty")
+        }
+
         guard maxQueueDepth >= 0 else {
             throw ValidationError("--max-queue-depth must be >= 0 (got \(maxQueueDepth))")
         }
@@ -216,14 +238,14 @@ struct LLMServer: AsyncParsableCommand {
         let engine: any InferenceEngine
         if functionalBatch {
             let requested = ConcurrentRequests(concurrentRequests) ?? .count(1)
-            let rows = try requested.resolve(supportsBatching: true, maxBatchSize: 2)
+            let rows = try requested.resolve(supportsBatching: true, maxBatchSize: bundle.maxBatchSize)
             guard prefixCacheMiB >= 0, prefixCacheMiB <= 2048 else {
                 throw ValidationError("--prefix-cache-mib must be between 0 and 2048")
             }
             if verbose { print("Loading functional batch backend") }
             let scheduler = try await BatchScheduler.functionalGemma(
                 assetURL: bundle.bundlePath, maxConcurrent: rows, maxQueued: maxQueueDepth,
-                prefixCacheBytes: prefixCacheMiB * 1024 * 1024)
+                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize)
             if verbose { print("Functional batch backend loaded") }
             functionalScheduler = scheduler
             engine = SchedulerSession(sink: scheduler, config: engineConfig, stopTokenIds: [])
@@ -288,7 +310,8 @@ struct LLMServer: AsyncParsableCommand {
             maxContextLength: bundle.maxContextLength,
             vocabSize: bundle.vocabSize,
             additionalEosTokenIds: additionalEosTokenIds,
-            maxQueueDepth: maxQueueDepth
+            maxQueueDepth: maxQueueDepth, maxOutputTokens: maxOutputTokens ?? engineConfig.maxContextLength,
+            requestTimeoutSeconds: requestTimeoutSeconds
         )
 
         // The scheduler holds up to --concurrent-requests plus --max-queue-depth requests, then rejects.
@@ -357,6 +380,7 @@ struct LLMServer: AsyncParsableCommand {
         }
         print("")
 
-        try await startServer(state: state, port: port, host: host)
+        try await startServer(state: state, port: port, host: host,
+            apiKey: apiKeyEnv.flatMap { ProcessInfo.processInfo.environment[$0] })
     }
 }

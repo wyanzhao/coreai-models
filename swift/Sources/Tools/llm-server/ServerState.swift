@@ -28,6 +28,8 @@ struct ServerConfig: Sendable {
     let vocabSize: Int?
     let additionalEosTokenIds: Set<Int32>
     let maxQueueDepth: Int
+    let maxOutputTokens: Int
+    let requestTimeoutSeconds: Double
 }
 
 // MARK: - Server Stats
@@ -186,7 +188,8 @@ final class ServerState: @unchecked Sendable {
             guard let batchServing else { return engine }
             return SchedulerSession(
                 sink: batchServing.scheduler, config: batchServing.modelConfig,
-                stopTokenIds: schedulerStopTokenIds)
+                stopTokenIds: schedulerStopTokenIds,
+                requestTimeout: config.requestTimeoutSeconds > 0 ? .seconds(config.requestTimeoutSeconds) : nil)
         case .fallbackBatchOne:
             return engine
         }

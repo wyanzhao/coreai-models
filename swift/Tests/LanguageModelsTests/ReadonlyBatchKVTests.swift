@@ -68,3 +68,27 @@ struct ReadonlyBatchKVTests {
         #expect(cache.lookup(prompt: [1,2,3,4,5], geometry: geometry)?.cursor == 4)
     }
 }
+
+extension ReadonlyBatchKVTests {
+    @Test func longDocumentsDoNotEvictProtectedShortPrefixes() throws {
+        let geometry = ReadonlyBatchKV.Geometry(context: 1024, ring: 4, window: 3,
+            globalLayers: 1, slidingLayers: 1, globalChannels: 512, slidingChannels: 1)
+        func make(_ count: Int) throws -> ReadonlyBatchKV {
+            var state = try ReadonlyBatchKV(geometry: geometry)
+            let global = [Float16](repeating: 1, count: count * 512)
+            let sliding = [Float16](repeating: 1, count: count)
+            try state.commit(globalK: global, globalV: global, slidingK: sliding, slidingV: sliding,
+                queryWidth: count, validTokens: count)
+            return state
+        }
+        let cache = ReadonlyPrefixCache(byteLimit: 4 * 1024 * 1024)
+        let short = [Int32](repeating: 1, count: 256)
+        cache.insert(tokens: short, state: try make(256))
+        let longState = try make(900)
+        for id in 2...5 { cache.insert(tokens: Array(repeating: Int32(id), count: 900), state: longState) }
+        #expect(cache.lookup(prompt: short + [9], geometry: geometry)?.cursor == 256)
+        #expect(cache.lookup(prompt: Array(repeating: 2, count: 901), geometry: geometry) == nil)
+        #expect(cache.lookup(prompt: Array(repeating: 5, count: 901), geometry: geometry)?.cursor == 900)
+        #expect(cache.residentBytes <= cache.byteLimit)
+    }
+}
