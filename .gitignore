@@ -35,3 +35,11 @@ python/.venv/
 exports/
 /*.jpeg
 /*.png
+
+# Machine-local assets and diagnostic archives
+/.venv
+/exports
+/models-source
+/experiments
+/AGENTS.md
+/ane-server/results/

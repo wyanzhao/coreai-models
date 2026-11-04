@@ -27,7 +27,7 @@ import CoreAI
 /// It is a reference type on purpose: `processedTokenCount` and `history` are mutated
 /// by the generation `Iterator` and observed by the engine's `generate()` shim across
 /// calls. A value type would give the iterator its own copy and break prefix reuse.
-package final class GenerationSessionState {
+package final class GenerationSessionState: BatchSessionState {
     /// KV cache — grows dynamically as tokens are processed.
     let kvCache: any SyncStateHandler
 

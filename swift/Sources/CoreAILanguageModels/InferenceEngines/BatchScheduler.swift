@@ -4,6 +4,7 @@
 // be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 import Synchronization
+import Foundation
 
 /// A `RequestSink` that decodes up to `maxConcurrent` requests in one shared batch session and
 /// admits new requests while others are still decoding. Safe to call from any task.
@@ -34,7 +35,7 @@ import Synchronization
 /// `score(_:)` requests run as their own padded batch between decode steps.
 package final class BatchScheduler: RequestSink, @unchecked Sendable {
     private let decodeStep: any BatchedDecodeStep
-    private let session: GenerationSessionState
+    private let session: any BatchSessionState
     package let maxConcurrent: Int
     /// Requests allowed to wait beyond the free rows, or `nil` for no limit. At least 0.
     private let maxQueued: Int?
@@ -105,7 +106,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
     }
 
     init(
-        decodeStep: any BatchedDecodeStep, session: GenerationSessionState, maxConcurrent: Int,
+        decodeStep: any BatchedDecodeStep, session: any BatchSessionState, maxConcurrent: Int,
         maxQueued: Int? = nil, maxPositions: Int = .max
     ) {
         precondition(maxConcurrent >= 1, "maxConcurrent must be >= 1")
@@ -189,12 +190,14 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
     /// that error.
     private func pump() async {
         var active: [ActiveRow?] = Array(repeating: nil, count: maxConcurrent)
+        var prefilling: [Pending?] = Array(repeating: nil, count: maxConcurrent)
         do {
             while true {
                 await engineLock.lock()
                 defer { engineLock.unlock() }
                 await runPendingScoring()
-                await admit(into: &active)
+                await admit(into: &active, prefilling: &prefilling)
+                await advancePrefills(active: &active, prefilling: &prefilling)
                 for slot in active.indices where active[slot]?.adapter.request.cancellation.isCancelled == true {
                     active[slot]!.continuation.finish()
                     retire(slot, active: &active)
@@ -202,6 +205,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
 
                 let liveSlots = active.indices.filter { active[$0] != nil }
                 if liveSlots.isEmpty {
+                    if prefilling.contains(where: { $0 != nil }) { continue }
                     // Requests and scoring jobs enqueued while `pumping` is set start no pump.
                     let more = state.withLock { s -> Bool in
                         if s.queue.isEmpty && s.scoring.isEmpty {
@@ -223,6 +227,7 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
             }
         } catch {
             for row in active where row != nil { row!.continuation.finish(throwing: error) }
+            for pending in prefilling where pending != nil { pending!.continuation.finish(throwing: error) }
             let (orphaned, orphanedScoring) = state.withLock { s -> ([Pending], [ScoringJob]) in
                 let waiting = (s.queue, s.scoring)
                 s.queue.removeAll()
@@ -240,8 +245,8 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
     /// token is sampled immediately. A request can retire during admission.
     ///
     /// A prefill error fails only that request's stream and leaves its slot free.
-    private func admit(into active: inout [ActiveRow?]) async {
-        for slot in active.indices where active[slot] == nil {
+    private func admit(into active: inout [ActiveRow?], prefilling: inout [Pending?]) async {
+        for slot in active.indices where active[slot] == nil && prefilling[slot] == nil {
             let pending: Pending? = state.withLock { s in
                 s.dropCancelledRequests()
                 guard !s.queue.isEmpty else { return nil }
@@ -250,6 +255,11 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
             }
             guard let pending else { break }
             do {
+                if let incremental = decodeStep as? any IncrementalPrefillStep {
+                    try incremental.beginPrefill(row: slot, promptTokens: pending.request.promptTokens, session: session)
+                    prefilling[slot] = pending
+                    continue
+                }
                 let adapter = BatchSessionAdapter(request: pending.request)
                 let logits = try await decodeStep.prefillRow(
                     row: slot, promptTokens: pending.request.promptTokens, session: session)
@@ -258,6 +268,33 @@ package final class BatchScheduler: RequestSink, @unchecked Sendable {
                     cursor: pending.request.promptTokens.count)
                 stepSlot(slot, logits: logits, active: &active)
             } catch {
+                state.withLock { $0.occupiedRows -= 1 }
+                pending.continuation.finish(throwing: error)
+            }
+        }
+    }
+
+    /// Bounded prefill work per resident row, followed by a shared decode step.
+    private func advancePrefills(active: inout [ActiveRow?], prefilling: inout [Pending?]) async {
+        guard let incremental = decodeStep as? any IncrementalPrefillStep else { return }
+        for slot in prefilling.indices {
+            guard let pending = prefilling[slot] else { continue }
+            if pending.request.cancellation.isCancelled {
+                prefilling[slot] = nil
+                state.withLock { $0.occupiedRows -= 1 }
+                pending.continuation.finish()
+                continue
+            }
+            do {
+                guard let logits = try await incremental.prefillChunk(
+                    row: slot, promptTokens: pending.request.promptTokens, session: session) else { continue }
+                prefilling[slot] = nil
+                active[slot] = ActiveRow(continuation: pending.continuation,
+                    adapter: BatchSessionAdapter(request: pending.request), lastToken: 0,
+                    cursor: pending.request.promptTokens.count)
+                stepSlot(slot, logits: logits, active: &active)
+            } catch {
+                prefilling[slot] = nil
                 state.withLock { $0.occupiedRows -= 1 }
                 pending.continuation.finish(throwing: error)
             }
@@ -523,4 +560,19 @@ final class AsyncFIFOLock: Sendable {
 struct RowResult: Sendable {
     let tokens: [Int32]
     let stopReason: StopReason
+}
+
+extension BatchScheduler {
+    package var functionalPrefixMetrics: (hits: Int, misses: Int, tokens: Int, bytes: Int)? {
+        (decodeStep as? CoreAIFunctionalBatchBackend)?.prefixMetrics
+    }
+    /// Experimental functional-KV Gemma backend; separate from ordinary model variants.
+    package static func functionalGemma(
+        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int
+    ) async throws -> BatchScheduler {
+        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes)
+        return BatchScheduler(decodeStep: backend,
+            session: try backend.makeBatchSessionState(batchSize: maxConcurrent),
+            maxConcurrent: maxConcurrent, maxQueued: maxQueued, maxPositions: backend.geometry.context)
+    }
 }

@@ -3,6 +3,12 @@
 // Use of this source code is governed by a BSD-3-clause license that can
 // be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
+/// Storage owned by one batched backend. The scheduler does not assume a KV layout.
+protocol BatchSessionState: AnyObject {
+    var estimatedStateBytes: Int { get }
+    var estimatedLogitsScratchBytes: Int { get }
+}
+
 // MARK: - Batched Decode Step
 
 /// Batched forward passes over the `N` rows of a batch KV cache: admitting a row, decoding all rows,
@@ -35,7 +41,7 @@ protocol BatchedDecodeStep {
     func decodeBatch(
         tokensPerRow: [[Int32]],
         startPositions: [Int],
-        session: GenerationSessionState
+        session: any BatchSessionState
     ) async throws -> [[LogitsScalarType]]
 
     /// Prefills `promptTokens` into row `row` of `session`'s KV cache, at positions
@@ -44,7 +50,7 @@ protocol BatchedDecodeStep {
     func prefillRow(
         row: Int,
         promptTokens: [Int32],
-        session: GenerationSessionState
+        session: any BatchSessionState
     ) async throws -> [LogitsScalarType]
 
     /// Runs `tokensPerRow` (`[N][q]`, every row at `startPosition`) and returns the logits at every
@@ -52,9 +58,16 @@ protocol BatchedDecodeStep {
     func allPositionLogits(
         tokensPerRow: [[Int32]],
         startPosition: Int,
-        session: GenerationSessionState
+        session: any BatchSessionState
     ) async throws -> [LogitsScalarType]
 
     /// Creates a session whose KV cache holds `batchSize` rows, at most `maxBatchCapacity`.
-    func makeSessionState(batchSize: Int) throws -> GenerationSessionState
+    func makeBatchSessionState(batchSize: Int) throws -> any BatchSessionState
+}
+
+/// Optional bounded prefill work, allowing decode between prompt chunks.
+protocol IncrementalPrefillStep: BatchedDecodeStep {
+    func beginPrefill(row: Int, promptTokens: [Int32], session: any BatchSessionState) throws
+    /// Returns final prompt logits only when the complete prompt has been committed.
+    func prefillChunk(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType]?
 }

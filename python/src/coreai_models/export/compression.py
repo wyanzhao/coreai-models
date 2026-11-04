@@ -334,6 +334,7 @@ def palettize_pytorch_model(
     example_inputs: tuple,
     palettization_config: "dict | KMeansPalettizerConfig",
     export_backend: ExportBackend | None = None,
+    num_workers: int = 32,
 ) -> nn.Module:
     """
     Palettize a PyTorch model using post-training palettization with coreai-opt.
@@ -345,6 +346,7 @@ def palettize_pytorch_model(
         palettization_config: Either a configuration dictionary (matching the
             inner shape coreai-opt expects under `kmeans_palettization_config`)
             or a prebuilt KMeansPalettizerConfig instance.
+        num_workers: Parallel centroid workers; reduce for memory-constrained hosts.
         export_backend: Backend for the finalized palettized model.
             Defaults to ExportBackend.CoreAI if not specified.
 
@@ -370,7 +372,7 @@ def palettize_pytorch_model(
     logger.info(f"Palettization config: {config}")
 
     palettizer = KMeansPalettizer(model, config)
-    prepared_model = palettizer.prepare(example_inputs=example_inputs, num_workers=32)
+    prepared_model = palettizer.prepare(example_inputs=example_inputs, num_workers=num_workers)
 
     finalized_model = palettizer.finalize(prepared_model, backend=export_backend)
 

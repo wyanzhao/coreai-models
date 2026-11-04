@@ -75,7 +75,7 @@ extension BatchScheduler {
         func scoreBatch(_ requests: [ScoreRequest]) async throws -> [LogProbabilities] {
             let rows = Self.paddedRows(
                 requests: requests.count, capacity: decodeStep.maxBatchCapacity, maxConcurrent: maxConcurrent)
-            let session = try decodeStep.makeSessionState(batchSize: rows)
+            let session = try decodeStep.makeBatchSessionState(batchSize: rows)
             let longest = requests.map(\.tokens.count).max() ?? 0
             var entries = Array(repeating: [LogProbabilities.Entry](), count: requests.count)
 

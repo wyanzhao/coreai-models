@@ -96,7 +96,8 @@ final class ServerStats: @unchecked Sendable {
 
     func buildResponse(
         prefixHitRate: Double, prefixHits: Int, prefixMisses: Int,
-        totalToolCalls: Int, topTools: [ToolCallStat]
+        totalToolCalls: Int, topTools: [ToolCallStat],
+        reusedPrefixTokens: Int? = nil, prefixCacheBytes: Int? = nil
     ) -> ServerStatsResponse {
         let s = lock.withLock { $0 }
         return ServerStatsResponse(
@@ -109,7 +110,8 @@ final class ServerStats: @unchecked Sendable {
             prefixHits: prefixHits,
             prefixMisses: prefixMisses,
             totalToolCalls: totalToolCalls,
-            topTools: topTools.isEmpty ? nil : topTools
+            topTools: topTools.isEmpty ? nil : topTools,
+            reusedPrefixTokens: reusedPrefixTokens, prefixCacheBytes: prefixCacheBytes
         )
     }
 }
@@ -210,6 +212,9 @@ final class ServerState: @unchecked Sendable {
     /// let engine = state.engineForRequest(lane: lane)
     /// ```
     func acquireAccess(lane: BatchServingLane) async throws -> RequestAccess {
+        if isFunctionalBatch && lane == .fallbackBatchOne {
+            throw ServerError.badRequest("Constrained generation is not enabled for functional batching")
+        }
         let permit = needsServerPermit(lane: lane) ? try await queue.acquire() : nil
         let lease = lane == .fallbackBatchOne ? await batchScheduler?.acquireExclusiveAccess() : nil
         return RequestAccess(permit: permit, lease: lease)
@@ -260,6 +265,8 @@ final class ServerState: @unchecked Sendable {
         return "fp_" + String(hash, radix: 16)
     }
 
+    var isFunctionalBatch: Bool { batchScheduler?.functionalPrefixMetrics != nil }
+
     var supportsToolCalling: Bool { toolCallDetection != nil }
 
     func makeToolCallParser() -> ToolCallParser? {
@@ -273,6 +280,9 @@ final class ServerState: @unchecked Sendable {
 
     /// Prepare engine for a new request. Returns the number of prefix tokens reused.
     func prepareForRequest(sessionID: String?, promptTokens: [Int32]) async -> Int {
+        // The functional backend restores immutable KV snapshots at admission.
+        // Do not report this legacy token-string comparison as actual KV reuse.
+        if isFunctionalBatch { return 0 }
         // Recurrent-state models (SSM/hybrid) cannot reuse a token prefix: the
         // engine full-resets and replays the whole prompt on any rewind. Skip the
         // prefix-reuse fast path entirely and count it as a miss for honest stats.
@@ -336,13 +346,17 @@ final class ServerState: @unchecked Sendable {
                 toolCallCounts: s.toolCallCounts, totalToolCalls: s.totalToolCalls
             )
         }
-        let hitTotal = s.prefixHits + s.prefixMisses
-        let hitRate = hitTotal > 0 ? Double(s.prefixHits) / Double(hitTotal) : 0
+        let functional = batchScheduler?.functionalPrefixMetrics
+        let hits = functional?.hits ?? s.prefixHits
+        let misses = functional?.misses ?? s.prefixMisses
+        let hitTotal = hits + misses
+        let hitRate = hitTotal > 0 ? Double(hits) / Double(hitTotal) : 0
         let topTools = s.toolCallCounts.sorted { $0.value > $1.value }.prefix(5)
             .map { ToolCallStat(name: $0.key, count: $0.value) }
         return stats.buildResponse(
-            prefixHitRate: hitRate, prefixHits: s.prefixHits, prefixMisses: s.prefixMisses,
-            totalToolCalls: s.totalToolCalls, topTools: topTools)
+            prefixHitRate: hitRate, prefixHits: hits, prefixMisses: misses,
+            totalToolCalls: s.totalToolCalls, topTools: topTools,
+            reusedPrefixTokens: functional?.tokens, prefixCacheBytes: functional?.bytes)
     }
 
     private enum PrepareAction {

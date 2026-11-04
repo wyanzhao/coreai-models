@@ -4,6 +4,7 @@
 // be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 import ArgumentParser
+import CoreAI
 import CoreAILMCommon
 import CoreAILanguageModels
 import CoreAIShared
@@ -46,6 +47,16 @@ struct LLMServer: AsyncParsableCommand {
 
     @Option(help: "HTTP port to listen on")
     var port: Int = 8080
+
+    @Option(help: "Network address to bind")
+    var host: String = "127.0.0.1"
+
+    @Flag(help: "Use experimental functional-KV Gemma batching asset")
+    var functionalBatch: Bool = false
+
+    @Option(name: .customLong("prefix-cache-mib"), help: "Functional prefix snapshot cache budget in MiB")
+    var prefixCacheMiB: Int = 256
+
 
     @Option(name: .customLong("server-model-name"), help: "Model name in API responses (default: from metadata)")
     var serverModelName: String?
@@ -188,7 +199,9 @@ struct LLMServer: AsyncParsableCommand {
 
         let modelURL = try bundle.modelBundle.requireModelURL(for: ModelBundle.ComponentKey.main)
 
-        let cacheHit = PreparedModel.isCached(at: modelURL)
+        let cacheHit = functionalBatch
+            ? PreparedModel.isCached(at: modelURL, options: SpecializationOptions(preferredComputeUnitKind: .neuralEngine))
+            : PreparedModel.isCached(at: modelURL)
 
         if !verbose && replayPath == nil {
             print("\n⏳ Preparing AI asset from \(modelURL.lastPathComponent)...", terminator: "")
@@ -199,13 +212,29 @@ struct LLMServer: AsyncParsableCommand {
 
         let engineConfig = ModelConfig(bundle: bundle)
         let configData = try JSONEncoder().encode(engineConfig)
-        let engine = try await EngineFactory.createEngine(
-            config: configData,
-            modelURL: modelURL,
-            options: engineOptions
-        )
+        let functionalScheduler: BatchScheduler?
+        let engine: any InferenceEngine
+        if functionalBatch {
+            let requested = ConcurrentRequests(concurrentRequests) ?? .count(1)
+            let rows = try requested.resolve(supportsBatching: true, maxBatchSize: 2)
+            guard prefixCacheMiB >= 0, prefixCacheMiB <= 2048 else {
+                throw ValidationError("--prefix-cache-mib must be between 0 and 2048")
+            }
+            if verbose { print("Loading functional batch backend") }
+            let scheduler = try await BatchScheduler.functionalGemma(
+                assetURL: bundle.bundlePath, maxConcurrent: rows, maxQueued: maxQueueDepth,
+                prefixCacheBytes: prefixCacheMiB * 1024 * 1024)
+            if verbose { print("Functional batch backend loaded") }
+            functionalScheduler = scheduler
+            engine = SchedulerSession(sink: scheduler, config: engineConfig, stopTokenIds: [])
+        } else {
+            functionalScheduler = nil
+            engine = try await EngineFactory.createEngine(config: configData, modelURL: modelURL, options: engineOptions)
+        }
 
+        if verbose { print("Loading tokenizer and chat template") }
         let tokenizer = try await bundle.loadTokenizer()
+        if verbose { print("Tokenizer loaded") }
 
         var additionalEosTokenIds: Set<Int32>
         if let tokenizerDir = bundle.tokenizerPath {
@@ -263,10 +292,10 @@ struct LLMServer: AsyncParsableCommand {
         )
 
         // The scheduler holds up to --concurrent-requests plus --max-queue-depth requests, then rejects.
-        var batchScheduler: BatchScheduler? = nil
+        var batchScheduler: BatchScheduler? = functionalScheduler
         let requested = ConcurrentRequests(concurrentRequests) ?? .count(1)
         let sequentialEngine = engine as? CoreAISequentialEngine
-        let supportsBatching = sequentialEngine?.supportsBatching ?? false
+        let supportsBatching = functionalScheduler != nil || (sequentialEngine?.supportsBatching ?? false)
         let rows: Int
         do {
             rows = try requested.resolve(supportsBatching: supportsBatching, maxBatchSize: bundle.maxBatchSize)
@@ -315,7 +344,7 @@ struct LLMServer: AsyncParsableCommand {
             print("  Sampling: temperature=\(temperature), topK=\(topKStr), topP=\(topPStr)")
         }
 
-        print("Serving \(modelName) on http://127.0.0.1:\(port)")
+        print("Serving \(modelName) on http://\(host):\(port)")
         if verbose {
             print("  POST /v1/chat/completions   (generate_until)")
             if supportsLogprobs {
@@ -328,6 +357,6 @@ struct LLMServer: AsyncParsableCommand {
         }
         print("")
 
-        try await startServer(state: state, port: port)
+        try await startServer(state: state, port: port, host: host)
     }
 }

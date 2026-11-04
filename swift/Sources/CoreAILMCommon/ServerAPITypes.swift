@@ -596,12 +596,15 @@ public struct ServerStatsResponse: Codable, Sendable {
     public let prefixMisses: Int
     public let totalToolCalls: Int
     public let topTools: [ToolCallStat]?
+    public let reusedPrefixTokens: Int?
+    public let prefixCacheBytes: Int?
 
     public init(
         totalRequests: Int, totalPromptTokens: Int, totalGenTokens: Int,
         avgPrefillTokPerSec: Double, avgDecodeTokPerSec: Double,
         prefixHitRate: Double, prefixHits: Int, prefixMisses: Int,
-        totalToolCalls: Int = 0, topTools: [ToolCallStat]? = nil
+        totalToolCalls: Int = 0, topTools: [ToolCallStat]? = nil,
+        reusedPrefixTokens: Int? = nil, prefixCacheBytes: Int? = nil
     ) {
         self.totalRequests = totalRequests
         self.totalPromptTokens = totalPromptTokens
@@ -613,6 +616,8 @@ public struct ServerStatsResponse: Codable, Sendable {
         self.prefixMisses = prefixMisses
         self.totalToolCalls = totalToolCalls
         self.topTools = topTools
+        self.reusedPrefixTokens = reusedPrefixTokens
+        self.prefixCacheBytes = prefixCacheBytes
     }
 
     enum CodingKeys: String, CodingKey {
@@ -626,6 +631,8 @@ public struct ServerStatsResponse: Codable, Sendable {
         case prefixMisses = "prefix_misses"
         case totalToolCalls = "total_tool_calls"
         case topTools = "top_tools"
+        case reusedPrefixTokens = "reused_prefix_tokens"
+        case prefixCacheBytes = "prefix_cache_bytes"
     }
 }
 

@@ -99,7 +99,7 @@ private final class CountUpDecodeStep: BatchedDecodeStep, @unchecked Sendable {
     private func leave() { record.withLock { $0.inFlight -= 1 } }
 
     func prefillRow(
-        row: Int, promptTokens: [Int32], session: GenerationSessionState
+        row: Int, promptTokens: [Int32], session: any BatchSessionState
     ) async throws -> [LogitsScalarType] {
         await enter()
         defer { leave() }
@@ -108,7 +108,7 @@ private final class CountUpDecodeStep: BatchedDecodeStep, @unchecked Sendable {
     }
 
     func decodeBatch(
-        tokensPerRow: [[Int32]], startPositions: [Int], session: GenerationSessionState
+        tokensPerRow: [[Int32]], startPositions: [Int], session: any BatchSessionState
     ) async throws -> [[LogitsScalarType]] {
         await enter()
         defer { leave() }
@@ -118,7 +118,7 @@ private final class CountUpDecodeStep: BatchedDecodeStep, @unchecked Sendable {
     }
 
     func allPositionLogits(
-        tokensPerRow: [[Int32]], startPosition: Int, session: GenerationSessionState
+        tokensPerRow: [[Int32]], startPosition: Int, session: any BatchSessionState
     ) async throws -> [LogitsScalarType] {
         await enter()
         defer { leave() }
@@ -129,7 +129,7 @@ private final class CountUpDecodeStep: BatchedDecodeStep, @unchecked Sendable {
         return countUpAllPositions(tokensPerRow)
     }
 
-    func makeSessionState(batchSize: Int) throws -> GenerationSessionState { dummySession() }
+    func makeBatchSessionState(batchSize: Int) throws -> any BatchSessionState { dummySession() }
 }
 
 /// Mock count-up `BatchedDecodeStep` whose `prefillRow` blocks until `release()`.
@@ -155,7 +155,7 @@ private final class GatedPrefillStep: BatchedDecodeStep, @unchecked Sendable {
     }
 
     func prefillRow(
-        row: Int, promptTokens: [Int32], session: GenerationSessionState
+        row: Int, promptTokens: [Int32], session: any BatchSessionState
     ) async throws -> [LogitsScalarType] {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             gate.withLock { g in
@@ -166,18 +166,18 @@ private final class GatedPrefillStep: BatchedDecodeStep, @unchecked Sendable {
     }
 
     func decodeBatch(
-        tokensPerRow: [[Int32]], startPositions: [Int], session: GenerationSessionState
+        tokensPerRow: [[Int32]], startPositions: [Int], session: any BatchSessionState
     ) async throws -> [[LogitsScalarType]] {
         tokensPerRow.map { oneHot(($0.last ?? 0) + 1) }
     }
 
     func allPositionLogits(
-        tokensPerRow: [[Int32]], startPosition: Int, session: GenerationSessionState
+        tokensPerRow: [[Int32]], startPosition: Int, session: any BatchSessionState
     ) async throws -> [LogitsScalarType] {
         countUpAllPositions(tokensPerRow)
     }
 
-    func makeSessionState(batchSize: Int) throws -> GenerationSessionState { dummySession() }
+    func makeBatchSessionState(batchSize: Int) throws -> any BatchSessionState { dummySession() }
 }
 
 @Suite("BatchScheduler")
@@ -477,5 +477,70 @@ struct SchedulerSessionSequenceTests {
         for try await output in sequence { tokens.append(output.tokenId) }
         #expect(tokens == [10, 20])
         #expect(sequence.stopReason == (finished ?? .maxTokens))
+    }
+}
+
+private final class ChunkedCountUpStep: IncrementalPrefillStep, @unchecked Sendable {
+    let delegate = CountUpDecodeStep(capacity: 2)
+    let maxBatchCapacity = 2
+    private let cursors = Mutex([0,0])
+    func beginPrefill(row: Int, promptTokens: [Int32], session: any BatchSessionState) throws {
+        cursors.withLock { $0[row] = 0 }
+    }
+    func prefillChunk(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType]? {
+        try await Task.sleep(for: .milliseconds(1))
+        let complete = cursors.withLock { values in
+            values[row] += 2
+            return values[row] >= promptTokens.count
+        }
+        return complete ? oneHot(((promptTokens.last ?? 0) + 1) % 64) : nil
+    }
+    func prefillRow(row: Int, promptTokens: [Int32], session: any BatchSessionState) async throws -> [LogitsScalarType] {
+        throw CountUpDecodeStep.Boom() // Scheduler must use the incremental contract.
+    }
+    func decodeBatch(tokensPerRow: [[Int32]], startPositions: [Int], session: any BatchSessionState) async throws -> [[LogitsScalarType]] {
+        try await delegate.decodeBatch(tokensPerRow: tokensPerRow, startPositions: startPositions, session: session)
+    }
+    func allPositionLogits(tokensPerRow: [[Int32]], startPosition: Int, session: any BatchSessionState) async throws -> [LogitsScalarType] {
+        countUpAllPositions(tokensPerRow)
+    }
+    func makeBatchSessionState(batchSize: Int) throws -> any BatchSessionState { dummySession() }
+}
+
+extension BatchSchedulerTests {
+    @Test("Decode advances while another row is still prefilling")
+    func incrementalPrefillDoesNotBlockDecode() async throws {
+        let step = ChunkedCountUpStep()
+        let scheduler = makeScheduler(step, maxConcurrent: 2)
+        let results = try await scheduler.run([
+            req(prompt: [1], maxTokens: 8),
+            req(prompt: Array(repeating: 10, count: 10), maxTokens: 3),
+            req(prompt: [20], maxTokens: 2),
+        ])
+        #expect(results.map(\.tokens) == [[2,3,4,5,6,7,8,9],[11,12,13],[21,22]])
+        #expect(step.delegate.observedStartPositions.contains([2,0]))
+        #expect(step.delegate.observedStartPositions.contains { $0[0] > 2 && $0[1] == 10 })
+        #expect(scheduler.occupancy.active == 0)
+        #expect(scheduler.occupancy.queued == 0)
+    }
+}
+
+extension BatchSchedulerTests {
+    @Test("Cancelling a prefilling request frees its slot for queued work")
+    func cancelIncrementalPrefill() async throws {
+        let step = ChunkedCountUpStep()
+        let scheduler = makeScheduler(step, maxConcurrent: 2)
+        let long = req(prompt: Array(repeating: 10, count: 1000), maxTokens: 3)
+        let streams = try [req(prompt: [1], maxTokens: 8), long,
+            req(prompt: [20], maxTokens: 2)].map { try scheduler.submit($0) }
+        while scheduler.occupancy.active < 2 { await Task.yield() }
+        long.cancellation.cancel()
+        let first = try await drain(streams[0])
+        let cancelled = try await drain(streams[1])
+        let queued = try await drain(streams[2])
+        #expect(first.tokens == [2,3,4,5,6,7,8,9])
+        #expect(cancelled.tokens.isEmpty)
+        #expect(queued.tokens == [21,22])
+        #expect(scheduler.occupancy.active == 0)
     }
 }

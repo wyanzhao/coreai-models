@@ -13,7 +13,7 @@ import NIOCore
 import NIOFoundationCompat
 import Tokenizers
 
-func startServer(state: ServerState, port: Int) async throws {
+func startServer(state: ServerState, port: Int, host: String = "127.0.0.1") async throws {
     let router = Router()
 
     router.get("/health") { _, _ in
@@ -79,7 +79,7 @@ func startServer(state: ServerState, port: Int) async throws {
     let app = Application(
         router: router,
         configuration: .init(
-            address: .hostname("127.0.0.1", port: port)
+            address: .hostname(host, port: port)
         ))
 
     // Process lifecycle is left to the supervising process. TODO: any in-process
@@ -114,6 +114,11 @@ private func handleChatCompletionsFromBody(body: ByteBuffer, state: ServerState,
             body: .init(byteBuffer: ByteBuffer(data: data)))
     }
 
+    if state.isFunctionalBatch, chatRequest.responseFormat?.extractedSchema != nil {
+        let error = ErrorResponse(error: .init(message: "Constrained generation is not enabled for functional batching", type: "invalid_request_error", code: nil))
+        return Response(status: .badRequest, headers: [.contentType: "application/json"],
+            body: .init(byteBuffer: ByteBuffer(data: try JSONEncoder().encode(error))))
+    }
     let lane = BatchServingRouter.lane(
         hasResponseSchema: chatRequest.responseFormat?.extractedSchema != nil)
     let access: RequestAccess
