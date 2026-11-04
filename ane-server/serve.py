@@ -8,6 +8,7 @@ VALUE_OPTIONS = {
     "host", "port", "server_model_name", "max_tokens", "max_output_tokens",
     "temperature", "concurrent_requests", "max_queue_depth", "prefix_cache_mib",
     "prefill_chunk_size", "request_timeout_seconds", "api_key_env", "prefill_chunks_per_step",
+    "stateful_prefill_model",
 }
 FLAGS = {"functional_batch", "no_thinking", "verbose", "disable_persistent_prefill"}
 
@@ -27,6 +28,16 @@ def command(config_path, binary=None):
         model = config_path.parent / model
     if not (model / "metadata.json").is_file():
         raise ValueError("Model directory is missing metadata.json")
+    if config.get("stateful_prefill_model") is not None:
+        state_path = config["stateful_prefill_model"]
+        if not isinstance(state_path, str) or not config.get("functional_batch"):
+            raise ValueError("stateful_prefill_model requires a path and functional_batch")
+        state_path = Path(state_path).expanduser()
+        if not state_path.is_absolute():
+            state_path = config_path.parent / state_path
+        if not (state_path / "batch-manifest.json").is_file():
+            raise ValueError("State bundle is missing batch-manifest.json")
+        config["stateful_prefill_model"] = str(state_path.resolve())
     root = Path(__file__).resolve().parent.parent
     executable = Path(binary) if binary else root / ".build/out/Products/Release/llm-server"
     if not executable.is_file():

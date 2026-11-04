@@ -1,0 +1,18 @@
+{
+  "model": "../ane-assets/gemma4-e2b-b4-c16384-v8-kvonly",
+  "functional_batch": true,
+  "host": "127.0.0.1",
+  "port": 18084,
+  "server_model_name": "gemma4-e2b-ane-batch",
+  "concurrent_requests": 4,
+  "prefill_chunk_size": 64,
+  "prefix_cache_mib": 128,
+  "max_queue_depth": 8,
+  "max_tokens": 1024,
+  "max_output_tokens": 4096,
+  "request_timeout_seconds": 120,
+  "temperature": 0,
+  "no_thinking": true,
+  "prefill_chunks_per_step": 1,
+  "stateful_prefill_model": "../ane-assets/gemma4-e2b-q64-state-v1"
+}

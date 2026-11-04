@@ -63,6 +63,9 @@ struct LLMServer: AsyncParsableCommand {
     @Flag(help: "Experimental direct runtime-layout KV reads; opt in only after benchmarking")
     var nativeKv = false
 
+    @Option(help: "Experimental compatible q64 state bundle")
+    var statefulPrefillModel: String?
+
     @Option(help: "Maximum prefill chunks between decode steps; zero visits all rows")
     var prefillChunksPerStep: Int = 1
 
@@ -173,6 +176,9 @@ struct LLMServer: AsyncParsableCommand {
     var verbose: Bool = false
 
     func validate() throws {
+        if statefulPrefillModel != nil && !functionalBatch {
+            throw ValidationError("--stateful-prefill-model requires --functional-batch")
+        }
         guard prefillChunksPerStep >= 0 else {
             throw ValidationError("prefill-chunks-per-step must be >= 0")
         }
@@ -257,7 +263,7 @@ struct LLMServer: AsyncParsableCommand {
             if verbose { print("Loading functional batch backend") }
             let scheduler = try await BatchScheduler.functionalGemma(
                 assetURL: bundle.bundlePath, maxConcurrent: rows, maxQueued: maxQueueDepth,
-                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize, persistentPrefill: !disablePersistentPrefill, nativeKV: nativeKv,
+                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize, persistentPrefill: !disablePersistentPrefill, nativeKV: nativeKv, statefulPrefillURL: statefulPrefillModel.map { URL(fileURLWithPath: $0) },
                 prefillChunksPerStep: prefillChunksPerStep)
             if verbose { print("Functional batch backend loaded") }
             functionalScheduler = scheduler

@@ -622,13 +622,17 @@ public struct ServerStatsResponse: Codable, Sendable {
     public let topTools: [ToolCallStat]?
     public let reusedPrefixTokens: Int?
     public let prefixCacheBytes: Int?
+    public let statefulPrefillChunks: Int?
+    public let statefulPrefillTokens: Int?
+    public let statefulPrefillRestores: Int?
 
     public init(
         totalRequests: Int, totalPromptTokens: Int, totalGenTokens: Int,
         avgPrefillTokPerSec: Double, avgDecodeTokPerSec: Double,
         prefixHitRate: Double, prefixHits: Int, prefixMisses: Int,
         totalToolCalls: Int = 0, topTools: [ToolCallStat]? = nil,
-        reusedPrefixTokens: Int? = nil, prefixCacheBytes: Int? = nil
+        reusedPrefixTokens: Int? = nil, prefixCacheBytes: Int? = nil,
+        statefulPrefillChunks: Int? = nil, statefulPrefillTokens: Int? = nil, statefulPrefillRestores: Int? = nil
     ) {
         self.totalRequests = totalRequests
         self.totalPromptTokens = totalPromptTokens
@@ -642,6 +646,9 @@ public struct ServerStatsResponse: Codable, Sendable {
         self.topTools = topTools
         self.reusedPrefixTokens = reusedPrefixTokens
         self.prefixCacheBytes = prefixCacheBytes
+        self.statefulPrefillChunks = statefulPrefillChunks
+        self.statefulPrefillTokens = statefulPrefillTokens
+        self.statefulPrefillRestores = statefulPrefillRestores
     }
 
     enum CodingKeys: String, CodingKey {
@@ -657,6 +664,9 @@ public struct ServerStatsResponse: Codable, Sendable {
         case topTools = "top_tools"
         case reusedPrefixTokens = "reused_prefix_tokens"
         case prefixCacheBytes = "prefix_cache_bytes"
+        case statefulPrefillChunks = "stateful_prefill_chunks"
+        case statefulPrefillTokens = "stateful_prefill_tokens"
+        case statefulPrefillRestores = "stateful_prefill_restores"
     }
 }
 

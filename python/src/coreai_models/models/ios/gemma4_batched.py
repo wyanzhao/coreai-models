@@ -121,3 +121,35 @@ class SpatialGeGLUMLP(nn.Module):
         x = x.transpose(-3, -1)
         gate = nn.functional.gelu(self.gate_proj(x), approximate="tanh")
         return self.down_proj(self.up_proj(x) * gate).transpose(-3, -1)
+
+
+class StatefulQ64Prefill(nn.Module):
+    """Separate B1/q64 state ABI, preserving the readonly attention computation.
+
+    Each state is rank4 [storing_layers, channels, 1, capacity]. The runtime
+    owns the buffers and supplies aligned offsets; all layers share one cursor.
+    Returned updates remain available for CPU prefix snapshots and decode rebind.
+    """
+    def __init__(self, decoder):
+        super().__init__()
+        self.decoder = decoder
+        self.decoder.model.emit_logits = False
+
+    def forward(self, transformer_input, rope_cos, rope_sin, causal_mask,
+                sliding_causal_mask, embedding_table, ple_embeddings,
+                global_position, sliding_position, key_cache, value_cache,
+                sliding_key_cache, sliding_value_cache):
+        from coreai_models.primitives._ops import mutable_slice_update
+        updates = self.decoder(transformer_input, rope_cos, rope_sin, causal_mask,
+                               sliding_causal_mask, key_cache, value_cache,
+                               sliding_key_cache, sliding_value_cache,
+                               embedding_table, ple_embeddings)
+        zero = torch.zeros_like(global_position)
+        for index, (cache, update) in enumerate(zip(
+                (key_cache, value_cache, sliding_key_cache, sliding_value_cache), updates)):
+            position = global_position if index < 2 else sliding_position
+            begin = torch.cat((zero, zero, zero, position))
+            end = torch.cat((zero + cache.shape[0], zero + cache.shape[1],
+                             zero + 1, position + 64))
+            mutable_slice_update(cache, update, begin, end)
+        return updates

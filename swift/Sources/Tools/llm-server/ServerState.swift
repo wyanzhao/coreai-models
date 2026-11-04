@@ -99,7 +99,8 @@ final class ServerStats: @unchecked Sendable {
     func buildResponse(
         prefixHitRate: Double, prefixHits: Int, prefixMisses: Int,
         totalToolCalls: Int, topTools: [ToolCallStat],
-        reusedPrefixTokens: Int? = nil, prefixCacheBytes: Int? = nil
+        reusedPrefixTokens: Int? = nil, prefixCacheBytes: Int? = nil,
+        statefulPrefillChunks: Int? = nil, statefulPrefillTokens: Int? = nil, statefulPrefillRestores: Int? = nil
     ) -> ServerStatsResponse {
         let s = lock.withLock { $0 }
         return ServerStatsResponse(
@@ -113,7 +114,8 @@ final class ServerStats: @unchecked Sendable {
             prefixMisses: prefixMisses,
             totalToolCalls: totalToolCalls,
             topTools: topTools.isEmpty ? nil : topTools,
-            reusedPrefixTokens: reusedPrefixTokens, prefixCacheBytes: prefixCacheBytes
+            reusedPrefixTokens: reusedPrefixTokens, prefixCacheBytes: prefixCacheBytes,
+            statefulPrefillChunks: statefulPrefillChunks, statefulPrefillTokens: statefulPrefillTokens, statefulPrefillRestores: statefulPrefillRestores
         )
     }
 }
@@ -350,6 +352,7 @@ final class ServerState: @unchecked Sendable {
             )
         }
         let functional = batchScheduler?.functionalPrefixMetrics
+        let stateful = batchScheduler?.functionalStatefulPrefillMetrics
         let hits = functional?.hits ?? s.prefixHits
         let misses = functional?.misses ?? s.prefixMisses
         let hitTotal = hits + misses
@@ -359,7 +362,8 @@ final class ServerState: @unchecked Sendable {
         return stats.buildResponse(
             prefixHitRate: hitRate, prefixHits: hits, prefixMisses: misses,
             totalToolCalls: s.totalToolCalls, topTools: topTools,
-            reusedPrefixTokens: functional?.tokens, prefixCacheBytes: functional?.bytes)
+            reusedPrefixTokens: functional?.tokens, prefixCacheBytes: functional?.bytes,
+            statefulPrefillChunks: stateful?.chunks, statefulPrefillTokens: stateful?.tokens, statefulPrefillRestores: stateful?.restores)
     }
 
     private enum PrepareAction {

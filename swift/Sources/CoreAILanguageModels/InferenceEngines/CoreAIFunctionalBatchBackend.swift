@@ -21,6 +21,12 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         }
     }
     private let nativeKV: Bool
+    private let statefulModel: AIModel?
+    private let statefulFunction: InferenceFunction?
+    private let stateCounters = Mutex((chunks: 0, tokens: 0, restores: 0))
+    var statefulPrefillMetrics: (chunks: Int, tokens: Int, restores: Int) {
+        stateCounters.withLock { $0 }
+    }
     final class PrefillBank {
         var buffers: [String: NDArray] = [:]
         var descriptors: [String: NDArrayDescriptor] = [:]
@@ -69,7 +75,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
     var prefixMetrics: (hits: Int, misses: Int, tokens: Int, bytes: Int) { counters.withLock { $0 } }
     var reusedPrefixTokens: Int { prefixMetrics.tokens }
 
-    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true, nativeKV: Bool = false) async throws {
+    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true, nativeKV: Bool = false, statefulPrefillURL: URL? = nil) async throws {
         guard let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf:
             assetURL.appendingPathComponent("batch-manifest.json"))) as? [String: Any],
             let abi = manifest["abi"] as? String,
@@ -188,6 +194,33 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             }
         }
         functions = loaded; embeddingInputs = tables
+        if let statefulPrefillURL {
+            let stateManifest = try JSONSerialization.jsonObject(with: Data(contentsOf:
+                statefulPrefillURL.appendingPathComponent("batch-manifest.json"))) as? [String: Any]
+            guard let stateManifest,
+                  stateManifest["abi"] as? String == "gemma4-stateful-prefill-v1",
+                  stateManifest["source_revision"] as? String == manifest["source_revision"] as? String,
+                  stateManifest["source_revision"] as? String != nil,
+                  stateManifest["compression"] as? String == manifest["compression"] as? String,
+                  stateManifest["context_capacity"] as? Int == context,
+                  stateManifest["sliding_ring"] as? Int == ring,
+                  stateManifest["global_storing_layers"] as? Int == ng,
+                  stateManifest["sliding_storing_layers"] as? Int == ns,
+                  let stateConfig = stateManifest["text_config"] as? [String: Any],
+                  NSDictionary(dictionary: stateConfig).isEqual(to: cfg),
+                  plan.prefillWidths.contains(64), ring % 64 == 0, persistentPrefill else {
+                throw InferenceRuntimeError.invalidState("Incompatible q64 state asset")
+            }
+            let stateModel = try await AIModel(contentsOf: statefulPrefillURL.appendingPathComponent("model.aimodel"),
+                options: SpecializationOptions(preferredComputeUnitKind: .neuralEngine))
+            guard let fn = try stateModel.loadFunction(named: "prefill_state_b1_q64_c\(context)"),
+                  Set(fn.descriptor.outputNames) == Set(["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]) else {
+                throw InferenceRuntimeError.invalidState("Missing q64 state function")
+            }
+            statefulModel = stateModel; statefulFunction = fn
+        } else {
+            statefulModel = nil; statefulFunction = nil
+        }
         CLILogger.log("Functional entrypoints ready")
     }
 
@@ -265,19 +298,37 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         if persistentPrefill { session.rows[row] = emptyState }
         defer { session.rows[row] = state }
         let remaining = promptTokens.count - state.cursor
+        // Preserve baseline chunk boundaries after arbitrary prefix restores.
+        // Realignment changes FP16 attention accumulation and failed a warm
+        // decode parity gate. Unaligned prefixes retain the functional route.
         let shape = try plan.prefill(remaining: remaining)
         let (physicalBatch,q,valid) = (shape.batch,shape.query,shape.valid)
         var tokens = Array(promptTokens[state.cursor..<state.cursor + valid])
         tokens += Array(repeating: 0, count: q - valid)
-        let bank = persistentPrefill && q > 1 ? try bindPrefillBank(session, row: row, query: q, state: state) : nil
+        let useState = statefulFunction != nil && q == 64 && valid == 64
+            && state.cursor % 64 == 0 && state.cursor % geometry.ring + 64 <= geometry.ring
+        let bank = persistentPrefill && q > 1
+            ? try bindPrefillBank(session, row: row, query: q, state: state, stateful: useState) : nil
         let position = state.cursor
-        let result = try await forward(
-            tokens: [tokens] + Array(repeating: Array(repeating: Int32(0), count: q), count: physicalBatch - 1),
-            states: [state] + Array(repeating: emptyState, count: physicalBatch - 1),
-            deviceCaches: bank?.buffers)
+        let result: StepOutput
+        do {
+            result = try await forward(
+                tokens: [tokens] + Array(repeating: Array(repeating: Int32(0), count: q), count: physicalBatch - 1),
+                states: [state] + Array(repeating: emptyState, count: physicalBatch - 1),
+                deviceCaches: useState ? nil : bank?.buffers, stateBank: useState ? bank : nil)
+        } catch {
+            // A failed stateful call may have partially mutated its bank.
+            endPrefill(row: row, session: session)
+            throw error
+        }
         try commit(result, row: 0, batch: physicalBatch, query: q, valid: valid, state: &state)
         if let bank {
-            writePrefillUpdates(bank, outputs: result, position: position, query: q, valid: valid)
+            if useState {
+                let first = stateCounters.withLock { $0.chunks += 1; $0.tokens += valid; return $0.chunks == 1 }
+                if first { CLILogger.log("q64 persistent state path engaged") }
+            } else {
+                writePrefillUpdates(bank, outputs: result, position: position, query: q, valid: valid)
+            }
             bank.cursor = state.cursor
         }
         session.boundCursors[row] = nil
@@ -424,11 +475,12 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
 
     /// A request owns one descriptor-checked bank. q32/q64 share it only when
     /// all physical descriptors agree. No layout or residency is inferred from shape.
-    private func bindPrefillBank(_ session: Session, row: Int, query: Int, state: ReadonlyBatchKV) throws -> PrefillBank {
-        let fn = functions["1:\(query)"]!
+    private func bindPrefillBank(_ session: Session, row: Int, query: Int, state: ReadonlyBatchKV, stateful: Bool = false) throws -> PrefillBank {
+        let fn = stateful ? statefulFunction! : functions["1:\(query)"]!
         var descriptors: [String: NDArrayDescriptor] = [:]
         for (name,_,layers,channels,capacity) in cacheLayouts {
-            guard case .ndArray(let desc) = fn.descriptor.inputDescriptor(of: name),
+            let valueDescriptor = stateful ? fn.descriptor.stateDescriptor(of: name) : fn.descriptor.inputDescriptor(of: name)
+            guard case .ndArray(let desc) = valueDescriptor,
                   desc.shape == [layers, channels, 1, capacity],
                   (desc.interleaveLayout?.factor ?? 1) == 1 || desc.interleaveLayout?.dimension != 2 else {
                 throw InferenceRuntimeError.invalidState("Unsupported prefill KV descriptor")
@@ -443,6 +495,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             _ = session.prefillCacheBytes.wrappingSubtract(old.bytes, ordering: .relaxed)
         }
         let bank = PrefillBank()
+        if stateful { stateCounters.withLock { $0.restores += 1 } }
         bank.descriptors = descriptors
         bank.cursor = state.cursor
         for (name,path,layers,channels,capacity) in cacheLayouts {
@@ -529,9 +582,9 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         }
     }
 
-    private func forward(tokens: [[Int32]], states: [ReadonlyBatchKV], deviceCaches: [String: NDArray]? = nil) async throws -> StepOutput {
+    private func forward(tokens: [[Int32]], states: [ReadonlyBatchKV], deviceCaches: [String: NDArray]? = nil, stateBank: PrefillBank? = nil) async throws -> StepOutput {
         let b = tokens.count; let q = tokens[0].count; let key = "\(b):\(q)"
-        guard let fn = functions[key], tokens.flatMap({$0}).allSatisfy({ $0 >= 0 && $0 < vocab }) else {
+        guard let fn = (stateBank == nil ? functions[key] : statefulFunction), tokens.flatMap({$0}).allSatisfy({ $0 >= 0 && $0 < vocab }) else {
             throw InferenceRuntimeError.invalidState("Unsupported functional shape or token")
         }
         var inputs: [String: NDArray] = [:]
@@ -569,6 +622,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             ("value_cache", \ReadonlyBatchKV.globalV, geometry.globalLayers, geometry.globalChannels, geometry.context),
             ("sliding_key_cache", \ReadonlyBatchKV.slidingK, geometry.slidingLayers, geometry.slidingChannels, geometry.ring),
             ("sliding_value_cache", \ReadonlyBatchKV.slidingV, geometry.slidingLayers, geometry.slidingChannels, geometry.ring)] {
+            if stateBank != nil { continue }
             if let cached = deviceCaches?[name] { inputs[name] = cached; continue }
             var flat: [Float16] = []
             for layer in 0..<layers { for state in states {
@@ -578,7 +632,25 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             try add(name, flat)
             if q > 1 { io.withLock { $0.legacyKVBytes += flat.count * MemoryLayout<Float16>.stride } }
         }
-        var output = try await fn.run(inputs: inputs)
+        var output: InferenceFunction.Outputs
+        if let stateBank {
+            try add("global_position", [Int32(states[0].cursor)])
+            try add("sliding_position", [Int32(states[0].cursor % geometry.ring)])
+            var k = stateBank.buffers.removeValue(forKey: "key_cache")!
+            var v = stateBank.buffers.removeValue(forKey: "value_cache")!
+            var sk = stateBank.buffers.removeValue(forKey: "sliding_key_cache")!
+            var sv = stateBank.buffers.removeValue(forKey: "sliding_value_cache")!
+            defer {
+                stateBank.buffers["key_cache"] = k; stateBank.buffers["value_cache"] = v
+                stateBank.buffers["sliding_key_cache"] = sk; stateBank.buffers["sliding_value_cache"] = sv
+            }
+            var views = InferenceFunction.MutableViews()
+            views.insert(&k, for: "key_cache"); views.insert(&v, for: "value_cache")
+            views.insert(&sk, for: "sliding_key_cache"); views.insert(&sv, for: "sliding_value_cache")
+            output = try await fn.run(inputs: inputs, states: _unsafeEscapeMutableViews(consume views))
+        } else {
+            output = try await fn.run(inputs: inputs)
+        }
         var result = StepOutput()
         let outputNames = (kvOnlyPrefill && q > 1 ? [] : ["logits"]) + ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
         for name in outputNames {

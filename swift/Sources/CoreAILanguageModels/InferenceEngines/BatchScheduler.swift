@@ -582,14 +582,17 @@ struct RowResult: Sendable {
 }
 
 extension BatchScheduler {
+    package var functionalStatefulPrefillMetrics: (chunks: Int, tokens: Int, restores: Int)? {
+        (decodeStep as? CoreAIFunctionalBatchBackend)?.statefulPrefillMetrics
+    }
     package var functionalPrefixMetrics: (hits: Int, misses: Int, tokens: Int, bytes: Int)? {
         (decodeStep as? CoreAIFunctionalBatchBackend)?.prefixMetrics
     }
     /// Experimental functional-KV Gemma backend; separate from ordinary model variants.
     package static func functionalGemma(
-        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true, nativeKV: Bool = false, prefillChunksPerStep: Int = 1
+        assetURL: URL, maxConcurrent: Int, maxQueued: Int, prefixCacheBytes: Int, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true, nativeKV: Bool = false, statefulPrefillURL: URL? = nil, prefillChunksPerStep: Int = 1
     ) async throws -> BatchScheduler {
-        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes, prefillQueryLimit: prefillQueryLimit, persistentPrefill: persistentPrefill, nativeKV: nativeKV)
+        let backend = try await CoreAIFunctionalBatchBackend(assetURL: assetURL, prefixCacheBytes: prefixCacheBytes, prefillQueryLimit: prefillQueryLimit, persistentPrefill: persistentPrefill, nativeKV: nativeKV, statefulPrefillURL: statefulPrefillURL)
         return BatchScheduler(decodeStep: backend,
             session: try backend.makeBatchSessionState(batchSize: maxConcurrent),
             maxConcurrent: maxConcurrent, maxQueued: maxQueued, maxPositions: backend.geometry.context, prefillChunksPerStep: prefillChunksPerStep)

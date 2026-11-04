@@ -13,8 +13,8 @@ from transformers import AutoConfig
 from coreai.authoring.types import AllocationType,HardwareConstraints
 from coreai_torch import TorchConverter
 from coreai_models.models.ios.gemma4_text import Gemma4ForCausalLMForiOS
-from coreai_models.models.ios.gemma4_batched import BatchedReadonlyGemma4,FlatKVBatchedReadonlyGemma4
-from coreai_models.export.mlir_ops import register_custom_torch_lowering
+from coreai_models.models.ios.gemma4_batched import BatchedReadonlyGemma4,FlatKVBatchedReadonlyGemma4,StatefulQ64Prefill
+from coreai_models.export.mlir_ops import register_custom_torch_lowering,remove_functionalization
 spec=importlib.util.spec_from_file_location('shipping_gemma_export',Path(__file__).with_name('export.py'))
 shipping=importlib.util.module_from_spec(spec);spec.loader.exec_module(shipping)
 log=logging.getLogger('batch-export')
@@ -47,11 +47,13 @@ def load_mapped(source,cache,context):
 
 def main():
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
-    ap=argparse.ArgumentParser();ap.add_argument('--source',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--context',type=int,default=2048);ap.add_argument('--no-compression',action='store_true');ap.add_argument('--kv-layout', choices=['auto','interleave8'], default='auto');ap.add_argument('--shapes',default='1:32,1:64,2:1,4:1');ap.add_argument('--source-revision');ap.add_argument('--kv-only-prefill',action='store_true');a=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--source',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--context',type=int,default=2048);ap.add_argument('--no-compression',action='store_true');ap.add_argument('--kv-layout', choices=['auto','interleave8'], default='auto');ap.add_argument('--shapes',default='1:32,1:64,2:1,4:1');ap.add_argument('--source-revision');ap.add_argument('--kv-only-prefill',action='store_true');ap.add_argument('--stateful-prefill',action='store_true');a=ap.parse_args()
     if a.output.exists():raise SystemExit('Use a new output directory; never overwrite an active asset.')
     a.output.mkdir(parents=True)
     shapes=[tuple(map(int,s.split(':'))) for s in a.shapes.split(',')]
     if any(b not in (1,2,4,8) or q not in (1,8,32,64) for b,q in shapes):raise ValueError('unsupported geometry')
+    if a.stateful_prefill and (shapes != [(1,64)] or not a.kv_only_prefill):
+        raise ValueError('stateful prefill requires --shapes 1:64 --kv-only-prefill')
     # Namespace mapped weights by source identity; tensor names alone are not a
     # cache key across checkpoints with the same architecture.
     weights=a.source/'model.safetensors'
@@ -78,7 +80,7 @@ def main():
     conv=TorchConverter();register_custom_torch_lowering(conv);contracts=[]
     ng=model.extend.model.n_global_storing;ns=model.extend.model.n_sliding_storing;ring=model.SLIDING_RING_SIZE
     for b,q in shapes:
-        name=f'decode_b{b}_q{q}_c{a.context}';log.info('Tracing %s',name)
+        name=f'prefill_state_b{b}_q{q}_c{a.context}' if a.stateful_prefill else f'decode_b{b}_q{q}_c{a.context}';log.info('Tracing %s',name)
         decoder.model.emit_logits = not (a.kv_only_prefill and q > 1)
         entry_outputs = outs if decoder.model.emit_logits else outs[1:]
         gm=torch.full((b,a.context+q,1,q),-40000.,dtype=torch.float16);sm=torch.full((b,ring+q,1,q),-40000.,dtype=torch.float16)
@@ -86,8 +88,19 @@ def main():
         k=torch.zeros(ng*b,cfg.num_key_value_heads*cfg.global_head_dim,1,a.context,dtype=torch.float16)
         sk=torch.zeros(ns*b,cfg.num_key_value_heads*cfg.head_dim,1,ring,dtype=torch.float16)
         args=(torch.zeros(b,q,1,cfg.hidden_size,dtype=torch.float16),torch.ones(b,q,cfg.head_dim+cfg.global_head_dim,dtype=torch.float16),torch.zeros(b,q,cfg.head_dim+cfg.global_head_dim,dtype=torch.float16),gm,sm,k,k.clone(),sk,sk.clone(),model.load_embeddings.embedding_table,torch.zeros(b,q,1,cfg.num_hidden_layers*cfg.hidden_size_per_layer_input,dtype=torch.int8))
-        with torch.no_grad():ep=torch.export.export(decoder,args).run_decompositions(shipping._ios_decomp_table())
-        conv.add_exported_program(ep,input_names=names,output_names=entry_outputs,entrypoint_name=name)
+        module = decoder
+        entry_names = names
+        states = []
+        if a.stateful_prefill:
+            module = StatefulQ64Prefill(decoder)
+            args = (*args[:5], *args[9:], torch.zeros(1,dtype=torch.int32),
+                    torch.zeros(1,dtype=torch.int32), *args[5:9])
+            entry_names = names[:5] + names[9:] + ['global_position','sliding_position']
+            states = names[5:9]
+        with torch.no_grad():ep=torch.export.export(module,args).run_decompositions(shipping._ios_decomp_table())
+        if a.stateful_prefill:remove_functionalization(ep)
+        conv.add_exported_program(ep,input_names=entry_names,state_names=states,
+                                  output_names=entry_outputs,entrypoint_name=name)
         contracts.append({'name':name,'request_batch':b,'query_width':q,'context_capacity':a.context,'outputs':entry_outputs})
         del ep,args;gc.collect()
     log.info('Converting complete decoder graphs')
@@ -101,7 +114,7 @@ def main():
     program.save_asset(a.output/'model.aimodel')
     for name in ('tokenizer.json','tokenizer_config.json','generation_config.json','config.json','chat_template.jinja'):
         shutil.copy2(a.source/name,a.output/name)
-    manifest={'abi':'gemma4-readonly-batch-v2' if a.kv_only_prefill else 'gemma4-readonly-batch-v1','status':'experimental-unvalidated','source_revision':a.source_revision,'source_identity':source_identity,'context_capacity':a.context,'kv_layout':a.kv_layout,'sliding_ring':ring,'sliding_window':cfg.sliding_window,'global_storing_layers':ng,'sliding_storing_layers':ns,'functions':contracts,'inputs':names,'outputs':outs,'embedding_file':'embeddings.safetensors','ple_file':Path(ple).name,'compression':'none' if a.no_compression else 'shipping-4bit-palettized','text_config':cfg.to_dict()}
+    manifest={'abi':'gemma4-stateful-prefill-v1' if a.stateful_prefill else ('gemma4-readonly-batch-v2' if a.kv_only_prefill else 'gemma4-readonly-batch-v1'),'status':'experimental-unvalidated','source_revision':a.source_revision,'source_identity':source_identity,'context_capacity':a.context,'kv_layout':a.kv_layout,'sliding_ring':ring,'sliding_window':cfg.sliding_window,'global_storing_layers':ng,'sliding_storing_layers':ns,'functions':contracts,'inputs':entry_names if a.stateful_prefill else names,'states':states if a.stateful_prefill else [],'outputs':outs[1:] if a.stateful_prefill else outs,'embedding_file':'embeddings.safetensors','ple_file':Path(ple).name,'compression':'none' if a.no_compression else 'shipping-4bit-palettized','text_config':cfg.to_dict()}
     (a.output/'batch-manifest.json').write_text(json.dumps(manifest,indent=2))
     # Prepack the immutable output embedding once on the export machine. The
     # Swift loader checks the runtime descriptor before using this layout.
