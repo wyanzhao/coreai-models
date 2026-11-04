@@ -144,3 +144,18 @@ See [the prefill optimization comparisons](PREFILL_RESULTS.md) for the v8 defaul
 [Measured results and acceptance gates](NATIVE_KV_RESULTS.md) cover direct
 runtime-layout reads and explicit mutable-state probes. The --native-kv
 option is experimental and defaults off; no stateful graph is deployed.
+
+## q64 stateful prefill
+
+The separate q64 state asset is integrated but remains opt-in. Full-model
+correctness passed; the HTTP comparison did not establish a stable speedup,
+so production retains v8 without stateful prefill.
+
+- [Integration and reproduction](STATEFUL_PREFILL.md): export, configuration,
+  correctness tests and comparison runner.
+- [Measured results](STATEFUL_PREFILL_RESULTS.md) and
+  [machine-readable metrics](stateful-prefill-results.json).
+- [Original integration plan](STATEFUL_PREFILL_PLAN.md).
+
+The combined-asset variant is an unfinished experiment retained locally;
+it is not included in the supported export or serving path.
