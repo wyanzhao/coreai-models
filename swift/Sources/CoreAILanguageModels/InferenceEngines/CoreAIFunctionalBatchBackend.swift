@@ -8,6 +8,19 @@ import Synchronization
 /// Experimental functional-KV backend. Calls must be serialized by BatchScheduler.
 /// This asset ABI is separate from the shipping static-shape engine.
 final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sendable {
+    struct StepOutput {
+        var logits: [Float16]?
+        var native: [String: NDArray] = [:]
+        var dense: [String: [Float16]] = [:]
+        subscript(_ name: String) -> [Float16]? { name == "logits" ? logits : dense[name] }
+        @inline(__always)
+        func withKV<R>(_ name: String, _ body: ((Int) -> Float16) -> R) -> R {
+            if let array = native[name] { return FunctionalTensorIO.withReader(array, body) }
+            let values = dense[name]!
+            return body { values[$0] }
+        }
+    }
+    private let nativeKV: Bool
     final class PrefillBank {
         var buffers: [String: NDArray] = [:]
         var descriptors: [String: NDArrayDescriptor] = [:]
@@ -56,7 +69,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
     var prefixMetrics: (hits: Int, misses: Int, tokens: Int, bytes: Int) { counters.withLock { $0 } }
     var reusedPrefixTokens: Int { prefixMetrics.tokens }
 
-    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true) async throws {
+    init(assetURL: URL, prefixCacheBytes: Int = 256 * 1024 * 1024, prefillQueryLimit: Int? = nil, persistentPrefill: Bool = true, nativeKV: Bool = false) async throws {
         guard let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf:
             assetURL.appendingPathComponent("batch-manifest.json"))) as? [String: Any],
             let abi = manifest["abi"] as? String,
@@ -84,6 +97,7 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         let headless = abi == "gemma4-readonly-batch-v2"
         kvOnlyPrefill = headless
         self.persistentPrefill = persistentPrefill
+        self.nativeKV = nativeKV
         guard let contracts = manifest["functions"] as? [[String: Any]] else {
             throw InferenceRuntimeError.invalidState("Missing functional graph contracts")
         }
@@ -336,19 +350,19 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         return logits.map { Float16(softcap * tanh(Float($0) / softcap)) }
     }
 
-    private func commit(_ outputs: [String: [Float16]], row: Int, batch: Int, query: Int, valid: Int, state: inout ReadonlyBatchKV) throws {
-        func extract(_ name: String, layers: Int, channels: Int) -> [Float16] {
-            let all = outputs[name]!
-            return (0..<layers).flatMap { layer in
-                let start = (layer * batch + row) * channels * query
-                return Array(all[start..<start + channels * query])
+    private func commit(_ outputs: StepOutput, row: Int, batch: Int, query: Int, valid: Int, state: inout ReadonlyBatchKV) throws {
+        let layouts = cacheLayouts
+        let names = ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
+        try state.commit(queryWidth: query, validTokens: valid) { index, destination, capacity, cursor in
+            let (_,_,layers,channels,_) = layouts[index]
+            outputs.withKV(names[index]) { read in
+                for layer in 0..<layers { for channel in 0..<channels { for j in 0..<valid {
+                    let slot = index < 2 ? cursor + j : (cursor + j) % capacity
+                    destination[(layer * channels + channel) * capacity + slot] =
+                        read(((layer * batch + row) * channels + channel) * query + j)
+                } } }
             }
         }
-        try state.commit(globalK: extract("new_global_k", layers: geometry.globalLayers, channels: geometry.globalChannels),
-            globalV: extract("new_global_v", layers: geometry.globalLayers, channels: geometry.globalChannels),
-            slidingK: extract("new_sliding_k", layers: geometry.slidingLayers, channels: geometry.slidingChannels),
-            slidingV: extract("new_sliding_v", layers: geometry.slidingLayers, channels: geometry.slidingChannels),
-            queryWidth: query, validTokens: valid)
     }
 
     private var cacheLayouts: [(String, KeyPath<ReadonlyBatchKV, [Float16]>, Int, Int, Int)] {
@@ -454,7 +468,6 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
                 }
                 io.withLock { $0.fullBindBytes += layers * channels * used * MemoryLayout<Float16>.stride }
             }
-            _ = index // Both global and ring snapshots use physical occupied slots.
             bank.buffers[name] = array
             bank.bytes += desc.minimumByteCount
         }
@@ -463,14 +476,17 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
         return bank
     }
 
-    private func writePrefillUpdates(_ bank: PrefillBank, outputs: [String: [Float16]], position: Int, query: Int, valid: Int) {
+    private func writePrefillUpdates(_ bank: PrefillBank, outputs: StepOutput, position: Int, query: Int, valid: Int) {
         let names = ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
         for (index,layout) in cacheLayouts.enumerated() {
             let (name,_,layers,channels,capacity) = layout
-            let values = outputs[names[index]]!
-            let factor = bank.buffers[name]!.interleaveLayout?.factor ?? 1
-            let dim = bank.buffers[name]!.interleaveLayout?.dimension ?? 0
-            bank.buffers[name]!.mutableView(as: Float16.self).withUnsafeMutablePointer { ptr,_,strides in
+            var destination = bank.buffers.removeValue(forKey: name)!
+            defer { bank.buffers[name] = destination }
+            outputs.withKV(names[index]) { read in
+            let factor = destination.interleaveLayout?.factor ?? 1
+            let dim = destination.interleaveLayout?.dimension ?? 0
+            let view = destination.mutableView(as: Float16.self)
+            view.withUnsafeMutablePointer { ptr,_,strides in
                 for layer in 0..<layers { for channel in 0..<channels {
                     let base = (dim == 0 ? layer / factor : layer) * strides[0]
                         + (dim == 1 ? channel / factor : channel) * strides[1]
@@ -479,36 +495,41 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
                         let slot = index < 2 ? position + j : (position + j) % capacity
                         let offset = base + (dim == 3 ? slot / factor : slot) * strides[3]
                             + (dim == 3 ? slot % factor : 0)
-                        ptr[offset] = values[(layer * channels + channel) * query + j]
+                        ptr[offset] = read((layer * channels + channel) * query + j)
                     }
                 } }
+            }
             }
             io.withLock { $0.updateBytes += layers * channels * valid * MemoryLayout<Float16>.stride }
         }
     }
 
-    private func writeDeviceUpdates(_ session: Session, outputs: [String: [Float16]], row: Int, position: Int, physicalBatch batch: Int) {
+    private func writeDeviceUpdates(_ session: Session, outputs: StepOutput, row: Int, position: Int, physicalBatch batch: Int) {
         let outputNames = ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
         for (index,layout) in cacheLayouts.enumerated() {
             let (name,_,layers,channels,capacity) = layout
             let slot = index < 2 ? position : position % capacity
-            let values = outputs[outputNames[index]]!
-            let factor = session.deviceCaches[name]!.interleaveLayout?.factor ?? 1
-            let dim = session.deviceCaches[name]!.interleaveLayout?.dimension ?? 0
-            session.deviceCaches[name]!.mutableView(as: Float16.self).withUnsafeMutablePointer { ptr, _, strides in
+            var destination = session.deviceCaches.removeValue(forKey: name)!
+            defer { session.deviceCaches[name] = destination }
+            outputs.withKV(outputNames[index]) { read in
+            let factor = destination.interleaveLayout?.factor ?? 1
+            let dim = destination.interleaveLayout?.dimension ?? 0
+            let view = destination.mutableView(as: Float16.self)
+            view.withUnsafeMutablePointer { ptr, _, strides in
                 for layer in 0..<layers { for channel in 0..<channels {
                     let outer = layer * batch + row
                     let offset = (dim == 0 ? outer / factor : outer) * strides[0]
                         + (dim == 1 ? channel / factor : channel) * strides[1]
                         + (dim == 3 ? slot / factor : slot) * strides[3]
                         + (dim == 0 ? outer % factor : (dim == 1 ? channel % factor : (dim == 3 ? slot % factor : 0)))
-                    ptr[offset] = values[(layer * batch + row) * channels + channel]
+                    ptr[offset] = read((layer * batch + row) * channels + channel)
                 } }
+            }
             }
         }
     }
 
-    private func forward(tokens: [[Int32]], states: [ReadonlyBatchKV], deviceCaches: [String: NDArray]? = nil) async throws -> [String: [Float16]] {
+    private func forward(tokens: [[Int32]], states: [ReadonlyBatchKV], deviceCaches: [String: NDArray]? = nil) async throws -> StepOutput {
         let b = tokens.count; let q = tokens[0].count; let key = "\(b):\(q)"
         guard let fn = functions[key], tokens.flatMap({$0}).allSatisfy({ $0 >= 0 && $0 < vocab }) else {
             throw InferenceRuntimeError.invalidState("Unsupported functional shape or token")
@@ -558,14 +579,29 @@ final class CoreAIFunctionalBatchBackend: IncrementalPrefillStep, @unchecked Sen
             if q > 1 { io.withLock { $0.legacyKVBytes += flat.count * MemoryLayout<Float16>.stride } }
         }
         var output = try await fn.run(inputs: inputs)
-        var result: [String: [Float16]] = [:]
+        var result = StepOutput()
         let outputNames = (kvOnlyPrefill && q > 1 ? [] : ["logits"]) + ["new_global_k","new_global_v","new_sliding_k","new_sliding_v"]
         for name in outputNames {
             guard let array = output.remove(name)?.ndArray else { throw InferenceRuntimeError.invalidState("Missing output \(name)") }
-            let values = FunctionalTensorIO.read(array)
-            guard values.allSatisfy({ $0.isFinite }) else { throw InferenceRuntimeError.invalidState("Nonfinite functional output") }
-            result[name] = values
-            if name == "logits" { io.withLock { $0.logitsReadBytes += values.count * MemoryLayout<Float16>.stride } }
+            if name != "logits", nativeKV {
+                let index = outputNames.filter { $0 != "logits" }.firstIndex(of: name)!
+                let (_,_,layers,channels,_) = cacheLayouts[index]
+                guard array.shape == [layers * b, channels, 1, q] else {
+                    throw InferenceRuntimeError.invalidState("Invalid native KV output extent")
+                }
+                let finite = FunctionalTensorIO.withReader(array) { read in
+                    (0..<(layers * b * channels * q)).allSatisfy { read($0).isFinite }
+                }
+                guard finite else { throw InferenceRuntimeError.invalidState("Nonfinite functional output") }
+                result.native[name] = array
+            } else {
+                let values = FunctionalTensorIO.read(array)
+                guard values.allSatisfy({ $0.isFinite }) else { throw InferenceRuntimeError.invalidState("Nonfinite functional output") }
+                if name == "logits" {
+                    result.logits = values
+                    io.withLock { $0.logitsReadBytes += values.count * MemoryLayout<Float16>.stride }
+                } else { result.dense[name] = values }
+            }
         }
         return result
     }

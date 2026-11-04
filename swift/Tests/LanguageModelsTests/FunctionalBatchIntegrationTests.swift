@@ -285,3 +285,42 @@ extension FunctionalBatchIntegrationTests {
         }
     }
 }
+
+extension FunctionalBatchIntegrationTests {
+    @Test(.timeLimit(.minutes(10))) func nativeKVMatchesDenseOutput() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["COREAI_NATIVE_KV"] == "1", let asset = env["COREAI_FUNCTIONAL_ASSET"],
+              let fixture = env["COREAI_FUNCTIONAL_CASE"] else { return }
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: fixture))) as! [String: Any]
+        let seed = (try #require(json["ids"] as? [Int])).map(Int32.init)
+        let repeated = Array(repeating: seed, count: 40).flatMap { $0 }
+        var reference: [[Float16]] = []
+        for native in [false,true] {
+            let backend = try await CoreAIFunctionalBatchBackend(assetURL: URL(fileURLWithPath: asset),
+                prefixCacheBytes: 128 * 1024 * 1024, nativeKV: native)
+            let session = try backend.makeBatchSessionState(batchSize: 4)
+            let lengths = [32,65,600,1089]
+            var values: [[Float16]] = []
+            for row in 0..<4 {
+                values.append(try await backend.prefillRow(row: row,
+                    promptTokens: Array(repeated.prefix(lengths[row])), session: session))
+            }
+            var cursors = lengths
+            for live in [[0,1,2,3],[0,2],[3],[0,1,2,3]] {
+                let outputs = try await backend.decodeBatch(tokensPerRow: [[1],[2],[3],[4]],
+                    startPositions: (0..<4).map { live.contains($0) ? cursors[$0] : 0 }, session: session)
+                for row in live { values.append(outputs[row]); cursors[row] += 1 }
+            }
+            values.append(try await backend.prefillRow(row: 0,
+                promptTokens: Array(repeated.prefix(1152)), session: session))
+            if native {
+                #expect(values.count == reference.count)
+                for (index,row) in values.enumerated() {
+                    let identical = row == reference[index]
+                    print("native-kv case=\(index) exact=\(identical)")
+                    #expect(identical)
+                }
+            } else { reference = values }
+        }
+    }
+}

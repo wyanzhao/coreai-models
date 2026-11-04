@@ -60,6 +60,9 @@ struct LLMServer: AsyncParsableCommand {
     @Flag(help: "Disable persistent prefill KV buffers for comparison")
     var disablePersistentPrefill = false
 
+    @Flag(help: "Experimental direct runtime-layout KV reads; opt in only after benchmarking")
+    var nativeKv = false
+
     @Option(help: "Maximum prefill chunks between decode steps; zero visits all rows")
     var prefillChunksPerStep: Int = 1
 
@@ -254,7 +257,7 @@ struct LLMServer: AsyncParsableCommand {
             if verbose { print("Loading functional batch backend") }
             let scheduler = try await BatchScheduler.functionalGemma(
                 assetURL: bundle.bundlePath, maxConcurrent: rows, maxQueued: maxQueueDepth,
-                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize, persistentPrefill: !disablePersistentPrefill,
+                prefixCacheBytes: prefixCacheMiB * 1024 * 1024, prefillQueryLimit: prefillChunkSize, persistentPrefill: !disablePersistentPrefill, nativeKV: nativeKv,
                 prefillChunksPerStep: prefillChunksPerStep)
             if verbose { print("Functional batch backend loaded") }
             functionalScheduler = scheduler

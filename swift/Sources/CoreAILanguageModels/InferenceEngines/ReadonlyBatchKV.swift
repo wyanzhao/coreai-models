@@ -121,6 +121,20 @@ struct ReadonlyBatchKV {
         cursor += validTokens
     }
 
+    /// The caller validates all source tensor extents and finiteness before entering.
+    /// Each writer borrows its native source and writes into this row's dense snapshot.
+    mutating func commit(queryWidth: Int, validTokens: Int,
+                         write: (Int, inout [Float16], Int, Int) -> Void) throws {
+        guard queryWidth > 0, validTokens > 0, validTokens <= queryWidth else { throw Failure.invalidUpdate }
+        guard validTokens <= geometry.context - cursor else { throw Failure.capacityExceeded }
+        write(0, &globalK, geometry.context, cursor)
+        write(1, &globalV, geometry.context, cursor)
+        write(2, &slidingK, geometry.ring, cursor)
+        write(3, &slidingV, geometry.ring, cursor)
+        for j in 0..<validTokens { slidingPositions[(cursor + j) % geometry.ring] = cursor + j }
+        cursor += validTokens
+    }
+
     /// Layout [pastCapacity + q, q] matches the graph's [B, S, 1, q].
     /// Mask per query position, including appended tokens outside the sliding window.
     func mask(queryWidth q: Int, sliding: Bool) -> [Float16] {

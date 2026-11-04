@@ -138,3 +138,9 @@ mixed HTTP probe benchmark_mixed.py introduces three8K requests after a1K
 request starts decoding, then records token gaps and completion times.
 
 See [the prefill optimization comparisons](PREFILL_RESULTS.md) for the v8 default, independent ablations, correctness gates and mixed-request latency.
+
+## Native KV experiments
+
+[Measured results and acceptance gates](NATIVE_KV_RESULTS.md) cover direct
+runtime-layout reads and explicit mutable-state probes. The --native-kv
+option is experimental and defaults off; no stateful graph is deployed.
