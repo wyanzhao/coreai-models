@@ -21,17 +21,17 @@ run on the GPU. The implementation and model exports remain experimental.
 
 | Area | Supported on the functional-batch route |
 |---|---|
-| Validated serving model | Gemma 4 E2B Instruct, text input/output, mixed 4-bit/8-bit palettization |
+| Validated serving model | Gemma 4 E2B Instruct, text input/output, mixed 4-bit and 8-bit weight palettization (lookup-table compression) |
 | Context | 16,384 tokens **total**, including template, input and output |
-| Decode batching | Independent request state; continuous batching; compact active rows into B2/B4 graphs |
-| Prefill | q32/q64 chunks; one globally scheduled chunk between decode steps by default |
+| Decode batching | Independent request state; continuous batching; group active requests into exported graphs for 2 or 4 requests |
+| Prefill | chunks of up to 32 or 64 input tokens; one globally scheduled chunk between decode steps by default |
 | KV memory | Persistent prefill buffers; descriptor-aware physical layout; bounded immutable prefix snapshots |
 | Prefix reuse | In-memory token-prefix reuse across requests; default budget 128 MiB |
 | API | Streaming and non-streaming POST /v1/chat/completions; GET /v1/models, /ready and /v1/stats |
 | Lifecycle | EOS/stop handling, bounded queue, cancellation cleanup, request deadline and output cap |
 | Operations | Configurable bind address/model ID; optional bearer authentication via environment variable; JSON launcher and per-user launchd installer |
 
-Decode capacity 4 is the interactive default. B8 graphs passed separate
+Up to 4 concurrent requests is the interactive default. Graphs for 8 concurrent requests passed separate
 correctness checks, but require a separate export and trade higher throughput
 for longer response latency; changing the request count alone cannot create
 missing model entrypoints. Prefill chunks are still executed serially across
@@ -42,10 +42,10 @@ constrained JSON-schema decoding, logprob scoring, vision/audio serving, or
 validated serving of other model families. The upstream model catalog has a
 broader scope than this custom backend.
 
-The experimental native-KV reader and q64 graph-state updates are not enabled
+The experimental native-KV reader and graph-state updates for 64-token prefill chunks are not enabled
 on this branch. The separate
 [experiment/stateful-q64 branch](https://github.com/wyanzhao/coreai-models/tree/experiment/stateful-q64)
-contains their follow-up evidence: q64 state passed full-model correctness but
+contains their follow-up evidence: state updates for 64-token prefill chunks passed full-model correctness but
 did not establish a stable speedup. Persistent host-side prefill buffers in v8
 are a different, accepted optimization.
 
@@ -113,14 +113,23 @@ PYTHONPATH="$PWD/python/src" USE_OS_COREAI=1 \
   --kv-only-prefill
 ~~~
 
-Default compression uses the shipping mixed 4-bit/8-bit palettization recipe,
-with two workers. Keep the default automatic KV layout. The bundle contains
+The export argument --shapes uses request-count:input-token-count pairs:
+1:32 and 1:64 export single-request prefill for 32 and 64 input tokens;
+2:1 and 4:1 export single-token decode for 2 and 4 requests. These are CLI
+values, not names for the deployment configuration.
+
+Default compression uses the shipping mixed 4-bit and 8-bit weight palettization recipe,
+with two workers. The bit counts describe compressed weight representation,
+not a promise that all arithmetic runs at 4-bit or 8-bit precision; the runtime
+also uses half-precision floating-point computation. Keep the default automatic KV layout. The bundle contains
 model.aimodel, metadata.json, batch-manifest.json, tokenizer/template resources,
 embeddings and PLE sidecars; deploy the **whole directory**.
 
-Intermediate q32/q64 calls return KV updates only; the q1 tail produces logits.
-The earlier 16K B1/q1 graph failed parity, so the validated single-row path
-uses B2/q1 with an inert second row. Export success is not a correctness pass:
+Intermediate prefill calls process 32 or 64 input tokens and return only key/value
+cache updates. The final single-token call produces logits.
+The earlier graph with a 16,384-token context, one request and one token per call
+failed parity. The validated single-request path therefore uses a two-request,
+single-token graph with an inactive second row. Export success is not a correctness pass:
 validate a newly exported bundle before replacing a service. Runtime
 specialization occurs on the target Mac and can make first startup slow.
 
@@ -173,6 +182,12 @@ A complete LAN configuration is:
 | Setting | Meaning |
 |---|---|
 | host | 127.0.0.1 for local clients; 0.0.0.0 for all interfaces, or the Mac's LAN address |
+| functional_batch | Enable the backend that keeps independent state for each request and batches decode work |
+| server_model_name | Model identifier returned by the API and selected in the client |
+| port | TCP port on which clients reach the service |
+| prefill_chunk_size | Maximum number of input tokens processed in one prefill chunk; 64 in this configuration |
+| temperature | Sampling temperature; 0 selects deterministic greedy token sampling |
+| no_thinking | Disable thinking mode in the model's chat-template configuration |
 | concurrent_requests | Up to 4 active requests with this export; additional requests wait in the bounded queue |
 | prefill_chunks_per_step | Global chunk budget before decode; 1 favors interactive progress; 0 visits every prefilling row |
 | max_tokens | Default output budget when the client does not provide one |
@@ -180,7 +195,7 @@ A complete LAN configuration is:
 | request_timeout_seconds | Queue plus inference deadline; checked between accelerator calls, not mid-call |
 | prefix_cache_mib | Memory budget for prefix snapshots; not an on-disk cache |
 
-16K is not 16K input plus 4K output. Reserve space for the template and output;
+A 16,384-token total context does not allow 16,384 input tokens plus 4096 output tokens. Reserve space for the template and output;
 the example permits at most 4096 output tokens, subject to remaining context.
 
 ~~~sh
@@ -279,7 +294,8 @@ check its custom URL/model, site or local-network permissions and page state.
 ## Measured performance
 
 Measurements below were made on the Mac mini M6 / 16 GiB / macOS 27.0.1 setup
-above, with the pinned E2B checkpoint, q64 prefill and 16K context.
+above, with the pinned E2B checkpoint, prefill chunks of up to 64 input tokens
+and a total context limit of 16,384 tokens.
 **These are measured workload rates, not peak ANE TOPS or utilization.**
 The v8 compiler metadata places 16,980 operations on ANE and 10 on GPU;
 operation counts are not execution-time fractions.
@@ -289,18 +305,18 @@ operation counts are not execution-time fractions.
 Four concurrent requests, 256 output tokens each. Throughput is aggregate
 **output tokens / entire HTTP batch wall time**, including prefill.
 
-| Nominal input | v6 end-to-end tok/s | v8 end-to-end tok/s | Gain | v6 mean TTFT | v8 mean TTFT |
+| Nominal input tokens | v6 end-to-end tok/s | v8 end-to-end tok/s | Gain | v6 mean TTFT | v8 mean TTFT |
 |---|---:|---:|---:|---:|---:|
-| 1K | 84.15 | 105.63 | 25.5% | 3.808 s | 1.206 s |
-| 4K | 46.03 | 83.23 | 80.8% | 14.004 s | 3.815 s |
-| 8K | 28.46 | 64.72 | 127.4% | 27.610 s | 7.332 s |
+| 1024 | 84.15 | 105.63 | 25.5% | 3.808 s | 1.206 s |
+| 4096 | 46.03 | 83.23 | 80.8% | 14.004 s | 3.815 s |
+| 8192 | 28.46 | 64.72 | 127.4% | 27.610 s | 7.332 s |
 
 The restart-isolated A,D,D,A,B,C,C,B campaign had 64 compiler-quiet,
 cold-prefix observations. Table entries average two observations; these are
 not population p95 estimates. Inputs are nominal; actual server token counts
 include template overhead. Single-request decode remains about **48 tok/s**.
 
-At 4K / concurrency4 / TG256, removing intermediate logits improves throughput
+With approximately 4096 input tokens, 4 concurrent requests and 256 output tokens per request, removing intermediate logits improves throughput
 from 46.03 to 67.70 tok/s; adding persistent prefill buffers reaches 85.74 tok/s.
 The global budget of one chunk reduces that to 83.23 tok/s but improves mixed
 workloads: when three long requests arrive, the short request completes in
@@ -309,23 +325,23 @@ workloads: when three long requests arrive, the short request completes in
 
 See [the full ablation report](ane-server/PREFILL_RESULTS.md),
 [raw summary metrics](ane-server/prefill-results.json) and
-[earlier B4/B8 comparison](ane-server/BATCH_COMPARISON.md). The B8 comparison
-used an older v7 asset; it is not a v8 B4/B8 comparison.
+[earlier comparison of 4 versus 8 concurrent requests](ane-server/BATCH_COMPARISON.md). That comparison
+used an older v7 asset; it does not compare 4 versus 8 concurrent requests on v8.
 
 ### Effective prefill rate
 
 A later cold-prefix single-request measurement of the same accepted v8 route
 estimated rate as **actual input tokens / HTTP time to first token**:
 
-| Nominal input | Effective rate | Mean TTFT |
+| Nominal input tokens | Effective rate | Mean TTFT |
 |---|---:|---:|
-| 1K | 3,394 input tok/s | 0.322 s |
-| 4K | 4,129 input tok/s | 1.008 s |
-| 8K | 4,295 input tok/s | 1.923 s |
+| 1024 | 3,394 input tok/s | 0.322 s |
+| 4096 | 4,129 input tok/s | 1.008 s |
+| 8192 | 4,295 input tok/s | 1.923 s |
 
-Each row uses six requests across TG128/256, with roughly 64 extra input tokens
+Each row uses six requests with output budgets of 128 or 256 tokens, with roughly 64 extra input tokens
 from templating. This includes HTTP, scheduling and first-token work; it is
-**not isolated model prefill TPS**. It belongs to a separate campaign from the
+**not isolated model prefill tokens per second**. It belongs to a separate campaign from the
 table above. [Source campaign and limitations](https://github.com/wyanzhao/coreai-models/blob/84e36c111ff972d0cc47313144430322e47a783e/ane-server/STATEFUL_PREFILL_RESULTS.md).
 
 ## Validation and benchmarking
@@ -344,7 +360,9 @@ A unit-only run is not a full-model validation. See
 [the validation record](ane-server/VALIDATION.md).
 
 For a new HTTP matrix, use a dedicated test instance/port, warm it first, then
-collect nominal PP1024/4096/8192 × TG128/256 with three repeats at concurrency1/4:
+collect nominal input lengths of 1024, 4096 and 8192 tokens, output budgets of
+128 and 256 tokens, and concurrency levels of 1 and 4 requests, with three
+repeats for each combination:
 
 ~~~sh
 .venv/bin/python ane-server/benchmark_server.py \
@@ -365,7 +383,7 @@ Replace SERVER_PID with the test server's PID and use fresh output filenames;
 these scripts can overwrite existing JSON. Add --api-key-file for authenticated
 test instances. Check compiler_quiet, reused_prefix_tokens, authoritative usage
 and finish reasons. Randomized system prefixes prevent repeated warmup prompts
-from making cold PP look artificially fast. Do not benchmark while exports,
+from making cold-input prefill appear artificially fast. Do not benchmark while exports,
 compiler audits or another load test are competing for the accelerator.
 
 benchmark_mixed.py measures interference from arriving long prompts.
